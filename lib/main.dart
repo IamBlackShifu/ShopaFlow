@@ -34,7 +34,7 @@ class ShopaFlowApp extends StatelessWidget {
             ),
           ),
           // Card theme for product tiles
-          cardTheme: CardTheme(
+          cardTheme: CardThemeData(
             elevation: 2,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),

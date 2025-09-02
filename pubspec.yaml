@@ -17,7 +17,7 @@ dependencies:
 
   # UI and Navigation
   cupertino_icons: ^1.0.6
-  material_color_utilities: ^0.5.0
+  material_color_utilities: ^0.11.1
 
   # State Management
   provider: ^6.1.1
