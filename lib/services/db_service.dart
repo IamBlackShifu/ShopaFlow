@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
@@ -124,7 +123,7 @@ class DatabaseService {
     ''');
 
     // Insert sample data for development
-    await _insertSampleData(db);
+    // await _insertSampleData(db);
   }
 
   /// Handle database upgrades
@@ -135,82 +134,94 @@ class DatabaseService {
     }
   }
 
-  /// Insert sample data for development and testing
-  Future<void> _insertSampleData(Database db) async {
-    final now = DateTime.now().toIso8601String();
-    
-    // Sample products
-    await db.insert('products', {
-      'name': 'Coca Cola 500ml',
-      'description': 'Refreshing cola drink',
-      'price': 1.50,
-      'cost': 0.80,
-      'stock_quantity': 25,
-      'min_stock_level': 10,
-      'barcode': '1234567890123',
-      'category': 'Beverages',
-      'sku': 'COKE-500',
-      'created_at': now,
-      'updated_at': now,
-    });
-
-    await db.insert('products', {
-      'name': 'Bread Loaf',
-      'description': 'Fresh white bread',
-      'price': 0.80,
-      'cost': 0.50,
-      'stock_quantity': 15,
-      'min_stock_level': 5,
-      'barcode': '2345678901234',
-      'category': 'Bakery',
-      'sku': 'BREAD-WHITE',
-      'created_at': now,
-      'updated_at': now,
-    });
-
-    await db.insert('products', {
-      'name': 'Milk 1L',
-      'description': 'Fresh whole milk',
-      'price': 2.20,
-      'cost': 1.50,
-      'stock_quantity': 8,
-      'min_stock_level': 10,
-      'barcode': '3456789012345',
-      'category': 'Dairy',
-      'sku': 'MILK-1L',
-      'created_at': now,
-      'updated_at': now,
-    });
-
-    await db.insert('products', {
-      'name': 'Rice 2kg',
-      'description': 'Long grain white rice',
-      'price': 4.50,
-      'cost': 3.00,
-      'stock_quantity': 12,
-      'min_stock_level': 5,
-      'barcode': '4567890123456',
-      'category': 'Groceries',
-      'sku': 'RICE-2KG',
-      'created_at': now,
-      'updated_at': now,
-    });
-  }
-
+  
   // PRODUCTS CRUD OPERATIONS
 
   /// Get all products
   Future<List<Map<String, dynamic>>> getAllProducts() async {
     final db = await database;
+    return await db.query('products', where: 'is_active = ?', whereArgs: [1]);
+  }
+
+  /// Get product by ID
+  Future<Map<String, dynamic>?> getProductById(int id) async {
+    final db = await database;
+    final results = await db.query('products', where: 'id = ?', whereArgs: [id]);
+    return results.isNotEmpty ? results.first : null;
+  }
+
+  /// Get product by barcode
+  Future<Map<String, dynamic>?> getProductByBarcode(String barcode) async {
+    final db = await database;
+    final results = await db.query('products', where: 'barcode = ?', whereArgs: [barcode]);
+    return results.isNotEmpty ? results.first : null;
+  }
+
+  /// Search products
+  Future<List<Map<String, dynamic>>> searchProducts(String query) async {
+    final db = await database;
     return await db.query(
       'products',
-      where: 'is_active = ?',
-      whereArgs: [1],
+      where: 'is_active = ? AND (name LIKE ? OR category LIKE ? OR barcode LIKE ?)',
+      whereArgs: [1, '%$query%', '%$query%', '%$query%'],
       orderBy: 'name ASC',
     );
   }
 
-  /// Get products with low stock
+  /// Add new product
+  Future<int> addProduct(Map<String, dynamic> product) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    
+    return await db.insert('products', {
+      ...product,
+      'created_at': now,
+      'updated_at': now,
+    });
+  }
+
+  /// Update product
+  Future<int> updateProduct(int id, Map<String, dynamic> product) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    
+    return await db.update(
+      'products',
+      {
+        ...product,
+        'updated_at': now,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Delete product (soft delete)
+  Future<int> deleteProduct(int id) async {
+    final db = await database;
+    return await db.update(
+      'products',
+      {'is_active': 0, 'updated_at': DateTime.now().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Update product stock
+  Future<int> updateProductStock(int productId, int newStock) async {
+    final db = await database;
+    return await db.update(
+      'products',
+      {
+        'stock_quantity': newStock,
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [productId],
+    );
+  }
+
+  /// Get low stock products
   Future<List<Map<String, dynamic>>> getLowStockProducts() async {
     final db = await database;
     return await db.rawQuery('''
@@ -220,131 +231,76 @@ class DatabaseService {
     ''');
   }
 
-  /// Get product by ID
-  Future<Map<String, dynamic>?> getProductById(int id) async {
+  /// Get products by category
+  Future<List<Map<String, dynamic>>> getProductsByCategory(String category) async {
     final db = await database;
-    final results = await db.query(
+    return await db.query(
       'products',
-      where: 'id = ? AND is_active = ?',
-      whereArgs: [id, 1],
-      limit: 1,
+      where: 'is_active = ? AND category = ?',
+      whereArgs: [1, category],
+      orderBy: 'name ASC',
     );
-    return results.isNotEmpty ? results.first : null;
-  }
-
-  /// Get product by barcode
-  Future<Map<String, dynamic>?> getProductByBarcode(String barcode) async {
-    final db = await database;
-    final results = await db.query(
-      'products',
-      where: 'barcode = ? AND is_active = ?',
-      whereArgs: [barcode, 1],
-      limit: 1,
-    );
-    return results.isNotEmpty ? results.first : null;
-  }
-
-  /// Insert new product
-  Future<int> insertProduct(Map<String, dynamic> product) async {
-    final db = await database;
-    final now = DateTime.now().toIso8601String();
-    
-    product['created_at'] = now;
-    product['updated_at'] = now;
-    product['synced'] = 0;
-    
-    final id = await db.insert('products', product);
-    
-    // Add to sync queue
-    await _addToSyncQueue('products', id, 'INSERT', product);
-    
-    return id;
-  }
-
-  /// Update product
-  Future<int> updateProduct(int id, Map<String, dynamic> product) async {
-    final db = await database;
-    final now = DateTime.now().toIso8601String();
-    
-    product['updated_at'] = now;
-    product['synced'] = 0;
-    
-    final result = await db.update(
-      'products',
-      product,
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-    
-    // Add to sync queue
-    await _addToSyncQueue('products', id, 'UPDATE', product);
-    
-    return result;
-  }
-
-  /// Update product stock
-  Future<int> updateProductStock(int productId, int newQuantity) async {
-    final now = DateTime.now().toIso8601String();
-    return await updateProduct(productId, {
-      'stock_quantity': newQuantity,
-      'updated_at': now,
-    });
-  }
-
-  /// Delete product (soft delete)
-  Future<int> deleteProduct(int id) async {
-    final now = DateTime.now().toIso8601String();
-    return await updateProduct(id, {
-      'is_active': 0,
-      'updated_at': now,
-    });
   }
 
   // SALES CRUD OPERATIONS
 
-  /// Insert new sale
-  Future<int> insertSale(Map<String, dynamic> sale, List<Map<String, dynamic>> saleItems) async {
+  /// Add new sale
+  Future<int> addSale(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
     
+    // Start transaction
     return await db.transaction((txn) async {
       // Insert sale record
-      sale['created_at'] = now;
-      sale['synced'] = 0;
-      final saleId = await txn.insert('sales', sale);
-      
-      // Insert sale items and update stock
-      for (final item in saleItems) {
-        item['sale_id'] = saleId;
-        item['created_at'] = now;
-        await txn.insert('sale_items', item);
-        
+      final saleId = await txn.insert('sales', {
+        ...sale,
+        'created_at': now,
+      });
+
+      // Insert sale items
+      for (var item in items) {
+        await txn.insert('sale_items', {
+          'sale_id': saleId,
+          ...item,
+          'created_at': now,
+        });
+
         // Update product stock
         await txn.rawUpdate('''
           UPDATE products 
-          SET stock_quantity = stock_quantity - ?, updated_at = ?
+          SET stock_quantity = stock_quantity - ?
           WHERE id = ?
-        ''', [item['quantity'], now, item['product_id']]);
+        ''', [item['quantity'], item['product_id']]);
       }
-      
-      // Add to sync queue
-      await _addToSyncQueue('sales', saleId, 'INSERT', sale);
-      
+
       return saleId;
     });
   }
 
-  /// Get sales by date range
-  Future<List<Map<String, dynamic>>> getSalesByDateRange(
-    DateTime startDate,
-    DateTime endDate,
-  ) async {
+  /// Get sales for a specific date
+  Future<List<Map<String, dynamic>>> getSalesByDate(DateTime date) async {
     final db = await database;
+    final dateStr = date.toIso8601String().substring(0, 10);
+
     return await db.query(
       'sales',
-      where: 'sale_date BETWEEN ? AND ?',
-      whereArgs: [startDate.toIso8601String(), endDate.toIso8601String()],
-      orderBy: 'sale_date DESC',
+      where: 'DATE(sale_date) = ?',
+      whereArgs: [dateStr],
+      orderBy: 'created_at DESC',
+    );
+  }
+
+  /// Get sales between dates
+  Future<List<Map<String, dynamic>>> getSalesBetweenDates(DateTime startDate, DateTime endDate) async {
+    final db = await database;
+    final startStr = startDate.toIso8601String().substring(0, 10);
+    final endStr = endDate.toIso8601String().substring(0, 10);
+
+    return await db.query(
+      'sales',
+      where: 'DATE(sale_date) BETWEEN ? AND ?',
+      whereArgs: [startStr, endStr],
+      orderBy: 'created_at DESC',
     );
   }
 
@@ -352,59 +308,85 @@ class DatabaseService {
   Future<List<Map<String, dynamic>>> getSaleItems(int saleId) async {
     final db = await database;
     return await db.rawQuery('''
-      SELECT si.*, p.name as product_name, p.sku
+      SELECT si.*, p.name as product_name, p.category
       FROM sale_items si
       JOIN products p ON si.product_id = p.id
       WHERE si.sale_id = ?
-      ORDER BY si.created_at ASC
+      ORDER BY si.id
     ''', [saleId]);
   }
 
+  /// Get all sales
+  Future<List<Map<String, dynamic>>> getAllSales() async {
+    final db = await database;
+    return await db.query('sales', orderBy: 'created_at DESC');
+  }
+
   /// Get daily sales summary
-  Future<Map<String, dynamic>> getDailySalesSummary(DateTime date) async {
+  Future<Map<String, dynamic>> getDailySalesSummary([DateTime? date]) async {
     final db = await database;
-    final startOfDay = DateTime(date.year, date.month, date.day).toIso8601String();
-    final endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59).toIso8601String();
-    
-    final results = await db.rawQuery('''
+    final targetDate = date ?? DateTime.now();
+    final dateStr = targetDate.toIso8601String().substring(0, 10);
+
+    final result = await db.rawQuery('''
       SELECT 
-        COUNT(*) as total_sales,
-        SUM(total_amount) as total_revenue,
+        COUNT(*) as transaction_count,
+        SUM(total_amount) as total_sales,
         SUM(tax_amount) as total_tax,
-        SUM(discount_amount) as total_discounts
-      FROM sales
-      WHERE sale_date BETWEEN ? AND ?
-    ''', [startOfDay, endOfDay]);
-    
-    return results.first;
+        SUM(discount_amount) as total_discount,
+        AVG(total_amount) as average_sale
+      FROM sales 
+      WHERE DATE(sale_date) = ?
+    ''', [dateStr]);
+
+    return result.isNotEmpty ? result.first : {
+      'transaction_count': 0,
+      'total_sales': 0.0,
+      'total_tax': 0.0,
+      'total_discount': 0.0,
+      'average_sale': 0.0,
+    };
   }
 
-  // CUSTOMERS CRUD OPERATIONS (Phase 3)
-
-  /// Get all customers
-  Future<List<Map<String, dynamic>>> getAllCustomers() async {
+  /// Get payment method breakdown
+  Future<List<Map<String, dynamic>>> getPaymentMethodBreakdown([DateTime? date]) async {
     final db = await database;
-    return await db.query(
-      'customers',
-      orderBy: 'name ASC',
-    );
+    final targetDate = date ?? DateTime.now();
+    final dateStr = targetDate.toIso8601String().substring(0, 10);
+
+    return await db.rawQuery('''
+      SELECT 
+        payment_method,
+        COUNT(*) as count,
+        SUM(total_amount) as total
+      FROM sales 
+      WHERE DATE(sale_date) = ?
+      GROUP BY payment_method
+      ORDER BY total DESC
+    ''', [dateStr]);
   }
 
-  /// Insert new customer
-  Future<int> insertCustomer(Map<String, dynamic> customer) async {
+  /// Get top selling products
+  Future<List<Map<String, dynamic>>> getTopSellingProducts([DateTime? date, int limit = 10]) async {
     final db = await database;
-    final now = DateTime.now().toIso8601String();
-    
-    customer['created_at'] = now;
-    customer['updated_at'] = now;
-    customer['synced'] = 0;
-    
-    final id = await db.insert('customers', customer);
-    
-    // Add to sync queue
-    await _addToSyncQueue('customers', id, 'INSERT', customer);
-    
-    return id;
+    final targetDate = date ?? DateTime.now();
+    final dateStr = targetDate.toIso8601String().substring(0, 10);
+
+    return await db.rawQuery('''
+      SELECT 
+        p.id,
+        p.name,
+        p.category,
+        SUM(si.quantity) as total_quantity,
+        SUM(si.total_price) as total_revenue
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      WHERE DATE(s.sale_date) = ?
+      GROUP BY p.id, p.name, p.category
+      ORDER BY total_quantity DESC
+      LIMIT ?
+    ''', [dateStr, limit]);
   }
 
   // SYNC OPERATIONS
@@ -491,7 +473,25 @@ class DatabaseService {
     });
   }
 
-  /// Close database connection
+  /// Export data to JSON
+  Future<Map<String, dynamic>> exportData() async {
+    final db = await database;
+
+    final products = await db.query('products');
+    final sales = await db.query('sales');
+    final saleItems = await db.query('sale_items');
+    final customers = await db.query('customers');
+
+    return {
+      'export_date': DateTime.now().toIso8601String(),
+      'products': products,
+      'sales': sales,
+      'sale_items': saleItems,
+      'customers': customers,
+    };
+  }
+
+  /// Close database
   Future<void> close() async {
     final db = _database;
     if (db != null) {
