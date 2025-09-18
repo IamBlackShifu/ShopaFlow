@@ -1,3 +1,4 @@
+import 'package:quick_print/quick_print.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'dart:async';
@@ -7,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/db_service.dart';
+import 'printer_settings.dart';
 import 'package:csv/csv.dart';
 
 // ================== MODELS & PROVIDERS ==================
@@ -757,6 +759,29 @@ class _MainScreenState extends State<MainScreen> {
 // ================== CHECKOUT / POS ==================
 class CheckoutScreen extends StatefulWidget { const CheckoutScreen({super.key}); @override State<CheckoutScreen> createState()=> _CheckoutScreenState(); }
 class _CheckoutScreenState extends State<CheckoutScreen> {
+  Future<void> _printReceipt(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
+    try {
+      final store = context.read<StoreInfoModel>();
+      final buffer = StringBuffer();
+      buffer.writeln(store.name);
+      buffer.writeln(store.address);
+      buffer.writeln('-----------------------------');
+      buffer.writeln('Receipt: ${sale['receipt_number']}');
+      buffer.writeln('Date: ${sale['sale_date']}');
+      buffer.writeln('-----------------------------');
+      for (final item in items) {
+        buffer.writeln('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}');
+      }
+      buffer.writeln('-----------------------------');
+      buffer.writeln('Total: ${sale['total_amount']}');
+      buffer.writeln('Payment: ${sale['payment_method']}');
+      buffer.writeln('Thank you!');
+  final quickPrint = QuickPrint();
+  await quickPrint.printText(buffer.toString());
+    } catch (e) {
+      // Ignore print errors, just save sale
+    }
+  }
   late ValueNotifier<List<Map<String, dynamic>>> _cartNotifier;
   final TextEditingController _search = TextEditingController();
   String query = '';
@@ -876,7 +901,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'unit_price': c['price'],
       'total_price': (c['price'] as num) * (c['qty'] as num)
     })).toList();
-    await db.addSale(sale, items);
+  await db.addSale(sale, items);
+  // Try to print receipt if printer is connected, but always save sale
+  _printReceipt(sale, items);
     for (final c in _cartNotifier.value) {
       final prodIdx = _products.indexWhere((p) => p['id'] == c['id']);
       if (prodIdx != -1) {
@@ -1372,6 +1399,17 @@ class _SettingsScreenState extends State<SettingsScreen>{
         ElevatedButton(onPressed: _saveStore, child: const Text('Save Store Info')),
       ]),
       const SizedBox(height:24),
+      _section('Printer Settings', [
+        ElevatedButton.icon(
+          icon: const Icon(Icons.print),
+          label: const Text('Configure Printer'),
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+            );
+          },
+        ),
+      ]),
       _section('Currency & Rates', [
         TextField(controller: _rateCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'USD -> ZWL Rate', border: OutlineInputBorder())), const SizedBox(height:12),
         ElevatedButton(onPressed: _saveRate, child: const Text('Update Rate')),

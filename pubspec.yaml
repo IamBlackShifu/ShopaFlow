@@ -38,6 +38,9 @@ dependencies:
   intl: ^0.18.1
   uuid: ^4.1.0
 
+  # Printing
+  quick_print: ^1.0.1
+
   # Cloud Services (Supabase) - Updated to latest version for better compatibility
   supabase_flutter: ^2.10.0
 
