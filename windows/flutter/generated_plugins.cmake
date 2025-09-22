@@ -4,12 +4,8 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   app_links
-  flutter_pos_printer_platform_image_3_sdt
-  pdfx
-  permission_handler_windows
   printing
   share_plus
-  universal_ble
   url_launcher_windows
 )
 

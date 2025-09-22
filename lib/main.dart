@@ -1,4 +1,4 @@
-import 'package:quick_print/quick_print.dart';
+import 'package:printing/printing.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'dart:async';
@@ -10,6 +10,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'services/db_service.dart';
 import 'printer_settings.dart';
 import 'package:csv/csv.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:pdf/pdf.dart';
 
 // ================== MODELS & PROVIDERS ==================
 class ExchangeRateModel extends ChangeNotifier {
@@ -759,29 +761,6 @@ class _MainScreenState extends State<MainScreen> {
 // ================== CHECKOUT / POS ==================
 class CheckoutScreen extends StatefulWidget { const CheckoutScreen({super.key}); @override State<CheckoutScreen> createState()=> _CheckoutScreenState(); }
 class _CheckoutScreenState extends State<CheckoutScreen> {
-  Future<void> _printReceipt(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
-    try {
-      final store = context.read<StoreInfoModel>();
-      final buffer = StringBuffer();
-      buffer.writeln(store.name);
-      buffer.writeln(store.address);
-      buffer.writeln('-----------------------------');
-      buffer.writeln('Receipt: ${sale['receipt_number']}');
-      buffer.writeln('Date: ${sale['sale_date']}');
-      buffer.writeln('-----------------------------');
-      for (final item in items) {
-        buffer.writeln('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}');
-      }
-      buffer.writeln('-----------------------------');
-      buffer.writeln('Total: ${sale['total_amount']}');
-      buffer.writeln('Payment: ${sale['payment_method']}');
-      buffer.writeln('Thank you!');
-  final quickPrint = QuickPrint();
-  await quickPrint.printText(buffer.toString());
-    } catch (e) {
-      // Ignore print errors, just save sale
-    }
-  }
   late ValueNotifier<List<Map<String, dynamic>>> _cartNotifier;
   final TextEditingController _search = TextEditingController();
   String query = '';
@@ -790,6 +769,41 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool _showCart = true; // cart visibility
   List<Map<String, dynamic>> _products = [];
   late DatabaseService db;
+
+  Future<void> _printReceipt(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
+    try {
+      final store = context.read<StoreInfoModel>();
+      final pdf = pw.Document();
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.roll80,
+          build: (pw.Context context) {
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(store.name, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 16)),
+                pw.Text(store.address, style: pw.TextStyle(fontSize: 10)),
+                pw.SizedBox(height: 8),
+                pw.Divider(),
+                pw.Text('Receipt: ${sale['receipt_number']}'),
+                pw.Text('Date: ${sale['sale_date']}'),
+                pw.Divider(),
+                ...items.map((item) => pw.Text('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}')).toList(),
+                pw.Divider(),
+                pw.Text('Total: ${sale['total_amount']}', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                pw.Text('Payment: ${sale['payment_method']}'),
+                pw.SizedBox(height: 8),
+                pw.Text('Thank you!'),
+              ],
+            );
+          },
+        ),
+      );
+      await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save());
+    } catch (e) {
+      // Ignore print errors, just save sale
+    }
+  }
 
   @override
   void initState() {
@@ -818,14 +832,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (mounted) setState(() => _loading = false);
   }
 
-  List<Map<String, dynamic>> get filtered => query.isEmpty
-      ? _products
-      : _products.where((p) {
-          final q = query.toLowerCase();
-          return (p['name'] ?? '').toString().toLowerCase().contains(q) ||
-              (p['category'] ?? '').toString().toLowerCase().contains(q) ||
-              (p['barcode'] ?? '').toString().contains(query);
-        }).toList();
+  List<Map<String, dynamic>> get filtered {
+    if (query.isEmpty) {
+      return _products;
+    } else {
+      final q = query.toLowerCase();
+      return _products.where((p) {
+        return (p['name'] ?? '').toString().toLowerCase().contains(q) ||
+            (p['category'] ?? '').toString().toLowerCase().contains(q) ||
+            (p['barcode'] ?? '').toString().contains(query);
+      }).toList();
+    }
+  }
 
   double get totalUSD => _cartNotifier.value.fold(0.0, (s, i) => s + (i['price'] as num) * (i['qty'] as int));
 
@@ -1350,8 +1368,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 }
 
 // ================== SETTINGS ==================
-class SettingsScreen extends StatefulWidget { const SettingsScreen({super.key}); @override State<SettingsScreen> createState()=> _SettingsScreenState(); }
-class _SettingsScreenState extends State<SettingsScreen>{
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
   final _nameCtrl = TextEditingController();
   final _addrCtrl = TextEditingController();
   final _rateCtrl = TextEditingController();

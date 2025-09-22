@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:quick_print/quick_print.dart';
+
+import 'package:flutter/material.dart';
 
 class PrinterSettingsPage extends StatefulWidget {
   const PrinterSettingsPage({Key? key}) : super(key: key);
@@ -9,59 +10,12 @@ class PrinterSettingsPage extends StatefulWidget {
 }
 
 class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
-  List<PrinterDevice> _devices = [];
-  PrinterDevice? _selectedDevice;
-  bool _scanning = false;
   String? _status;
 
-  Future<void> _scan() async {
-    setState(() {
-      _scanning = true;
-      _status = null;
-    });
-    try {
-      final devices = await QuickPrint.instance.scanPrinters();
-      setState(() {
-        _devices = devices;
-        _scanning = false;
-      });
-    } catch (e) {
-      setState(() {
-        _status = 'Scan failed: $e';
-        _scanning = false;
-      });
-    }
-  }
-
-  Future<void> _connect(PrinterDevice device) async {
-    setState(() {
-      _status = 'Connecting...';
-    });
-    try {
-      await QuickPrint.instance.connect(device);
-      setState(() {
-        _selectedDevice = device;
-        _status = 'Connected to ${device.name}';
-      });
-    } catch (e) {
-      setState(() {
-        _status = 'Connection failed: $e';
-      });
-    }
-  }
-
   Future<void> _testPrint() async {
-    if (_selectedDevice == null) return;
-    try {
-      await QuickPrint.instance.printText('Test print from ShopaFlow!');
-      setState(() {
-        _status = 'Test print sent.';
-      });
-    } catch (e) {
-      setState(() {
-        _status = 'Print failed: $e';
-      });
-    }
+    setState(() {
+      _status = 'Printing uses the system print dialog. Test by completing a sale.';
+    });
   }
 
   @override
@@ -73,31 +27,30 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ElevatedButton(
-              onPressed: _scanning ? null : _scan,
-              child: Text(_scanning ? 'Scanning...' : 'Scan for Printers'),
+            const Text(
+              'Printing Configuration',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
-            if (_devices.isNotEmpty)
-              ...[
-                const Text('Available Printers:'),
-                ..._devices.map((d) => ListTile(
-                      title: Text(d.name ?? 'Unknown'),
-                      subtitle: Text(d.address ?? ''),
-                      trailing: _selectedDevice == d
-                          ? const Icon(Icons.check, color: Colors.green)
-                          : null,
-                      onTap: () => _connect(d),
-                    )),
-              ],
-            if (_selectedDevice != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                child: ElevatedButton(
-                  onPressed: _testPrint,
-                  child: const Text('Test Print'),
-                ),
-              ),
+            const Text(
+              'This app uses the standard Flutter printing system. When you complete a sale, a print dialog will appear allowing you to select your printer and print settings.',
+              style: TextStyle(fontSize: 14),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Supported printers:',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            const Text('• Bluetooth thermal printers'),
+            const Text('• USB printers'),
+            const Text('• Network printers'),
+            const Text('• System default printers'),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: _testPrint,
+              child: const Text('Test Print Info'),
+            ),
             if (_status != null)
               Padding(
                 padding: const EdgeInsets.only(top: 16),
