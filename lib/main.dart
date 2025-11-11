@@ -782,13 +782,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               crossAxisAlignment: pw.CrossAxisAlignment.start,
               children: [
                 pw.Text(store.name, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 16)),
-                pw.Text(store.address, style: pw.TextStyle(fontSize: 10)),
+                pw.Text(store.address, style: const pw.TextStyle(fontSize: 10)),
                 pw.SizedBox(height: 8),
                 pw.Divider(),
                 pw.Text('Receipt: ${sale['receipt_number']}'),
                 pw.Text('Date: ${sale['sale_date']}'),
                 pw.Divider(),
-                ...items.map((item) => pw.Text('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}')).toList(),
+                ...items.map((item) => pw.Text('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}')),
                 pw.Divider(),
                 pw.Text('Total: ${sale['total_amount']}', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
                 pw.Text('Payment: ${sale['payment_method']}'),
@@ -1883,8 +1883,9 @@ class _ProductsScreenState extends State<ProductsScreen> {
         ],
       ),
     );
-    if (result == 'sample') await _downloadSampleCSV();
-    else if (result == 'import') await _performCSVImport();
+    if (result == 'sample') {
+      await _downloadSampleCSV();
+    } else if (result == 'import') await _performCSVImport();
   }
 
   Future<void> _downloadSampleCSV() async {

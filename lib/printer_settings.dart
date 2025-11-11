@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/material.dart';
 
 class PrinterSettingsPage extends StatefulWidget {
-  const PrinterSettingsPage({Key? key}) : super(key: key);
+  const PrinterSettingsPage({super.key});
 
   @override
   State<PrinterSettingsPage> createState() => _PrinterSettingsPageState();
