@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/db_service.dart';
+import 'services/bluetooth_printer_service.dart';
 import 'printer_settings.dart';
 import 'package:csv/csv.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -134,6 +135,7 @@ class ShopaFlowApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ExchangeRateModel()),
         ChangeNotifierProvider(create: (_) => ThemeModel()),
         ChangeNotifierProvider(create: (_) => SetupStatusModel()),
+        ChangeNotifierProvider(create: (_) => BluetoothPrinterService()),
         Provider(create: (_) => DatabaseService()),
         // Add other providers here if needed
       ],
@@ -772,34 +774,50 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Future<void> _printReceipt(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
     try {
+      final printerService = context.read<BluetoothPrinterService>();
       final store = context.read<StoreInfoModel>();
-      final pdf = pw.Document();
-      pdf.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat.roll80,
-          build: (pw.Context context) {
-            return pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: [
-                pw.Text(store.name, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 16)),
-                pw.Text(store.address, style: const pw.TextStyle(fontSize: 10)),
-                pw.SizedBox(height: 8),
-                pw.Divider(),
-                pw.Text('Receipt: ${sale['receipt_number']}'),
-                pw.Text('Date: ${sale['sale_date']}'),
-                pw.Divider(),
-                ...items.map((item) => pw.Text('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}')),
-                pw.Divider(),
-                pw.Text('Total: ${sale['total_amount']}', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                pw.Text('Payment: ${sale['payment_method']}'),
-                pw.SizedBox(height: 8),
-                pw.Text('Thank you!'),
-              ],
-            );
-          },
-        ),
-      );
-      await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save());
+      
+      // Try Bluetooth printer first if connected
+      if (printerService.isConnected) {
+        await printerService.printReceipt(
+          receiptNumber: sale['receipt_number'] ?? '',
+          saleDate: DateTime.parse(sale['sale_date'] ?? DateTime.now().toString()),
+          items: items,
+          total: (sale['total_amount'] ?? 0.0).toDouble(),
+          paymentMethod: sale['payment_method'] ?? 'Cash',
+          storeName: store.name,
+          storeAddress: store.address,
+        );
+      } else {
+        // Fallback to PDF printing if no Bluetooth printer connected
+        final pdf = pw.Document();
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.roll80,
+            build: (pw.Context context) {
+              return pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(store.name, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 16)),
+                  pw.Text(store.address, style: const pw.TextStyle(fontSize: 10)),
+                  pw.SizedBox(height: 8),
+                  pw.Divider(),
+                  pw.Text('Receipt: ${sale['receipt_number']}'),
+                  pw.Text('Date: ${sale['sale_date']}'),
+                  pw.Divider(),
+                  ...items.map((item) => pw.Text('${item['quantity']} x ${item['product_id']} @ ${item['unit_price']}')),
+                  pw.Divider(),
+                  pw.Text('Total: ${sale['total_amount']}', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                  pw.Text('Payment: ${sale['payment_method']}'),
+                  pw.SizedBox(height: 8),
+                  pw.Text('Thank you!'),
+                ],
+              );
+            },
+          ),
+        );
+        await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save());
+      }
     } catch (e) {
       // Ignore print errors, just save sale
     }
@@ -919,9 +937,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'unit_price': c['price'],
       'total_price': (c['price'] as num) * (c['qty'] as num)
     })).toList();
+    
+    // Create items with names for printing
+    final itemsWithNames = _cartNotifier.value.map((c) => ({
+      'product_id': c['id'],
+      'name': c['name'],
+      'quantity': c['qty'],
+      'unit_price': c['price'],
+      'total_price': (c['price'] as num) * (c['qty'] as num)
+    })).toList();
+    
   await db.addSale(sale, items);
   // Try to print receipt if printer is connected, but always save sale
-  _printReceipt(sale, items);
+  _printReceipt(sale, itemsWithNames);
     for (final c in _cartNotifier.value) {
       final prodIdx = _products.indexWhere((p) => p['id'] == c['id']);
       if (prodIdx != -1) {
