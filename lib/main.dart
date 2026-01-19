@@ -8,7 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/db_service.dart';
-import 'services/bluetooth_printer_service.dart';
+import 'services/printer_manager.dart';
 import 'printer_settings.dart';
 import 'package:csv/csv.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -135,7 +135,7 @@ class ShopaFlowApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ExchangeRateModel()),
         ChangeNotifierProvider(create: (_) => ThemeModel()),
         ChangeNotifierProvider(create: (_) => SetupStatusModel()),
-        ChangeNotifierProvider(create: (_) => BluetoothPrinterService()),
+        ChangeNotifierProvider(create: (_) => PrinterManager()),
         Provider(create: (_) => DatabaseService()),
         // Add other providers here if needed
       ],
@@ -774,12 +774,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Future<void> _printReceipt(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
     try {
-      final printerService = context.read<BluetoothPrinterService>();
+      final printerManager = context.read<PrinterManager>();
       final store = context.read<StoreInfoModel>();
       
-      // Try Bluetooth printer first if connected
-      if (printerService.isConnected) {
-        await printerService.printReceipt(
+      // Try printer if connected (either Bluetooth or Sunmi)
+      if (printerManager.isConnected) {
+        await printerManager.printReceipt(
           receiptNumber: sale['receipt_number'] ?? '',
           saleDate: DateTime.parse(sale['sale_date'] ?? DateTime.now().toString()),
           items: items,
@@ -789,7 +789,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           storeAddress: store.address,
         );
       } else {
-        // Fallback to PDF printing if no Bluetooth printer connected
+        // Fallback to PDF printing if no printer connected
         final pdf = pw.Document();
         pdf.addPage(
           pw.Page(

@@ -41,6 +41,7 @@ dependencies:
   print_bluetooth_thermal: ^1.1.1
   esc_pos_utils_plus: ^2.0.1
   image: ^4.0.17
+  sunmi_printer_plus: ^4.1.1
 
   # Cloud Services (Supabase)
   supabase_flutter: ^2.10.0

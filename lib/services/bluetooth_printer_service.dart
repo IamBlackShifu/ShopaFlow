@@ -3,8 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:image/image.dart' as img;
+import 'printer_service_interface.dart';
 
-class BluetoothPrinterService extends ChangeNotifier {
+class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceInterface {
+  @override
+  PrinterType get printerType => PrinterType.bluetooth;
+
   List<BluetoothInfo> _availablePrinters = [];
   BluetoothInfo? _connectedPrinter;
   bool _isConnected = false;
@@ -13,12 +17,19 @@ class BluetoothPrinterService extends ChangeNotifier {
 
   List<BluetoothInfo> get availablePrinters => _availablePrinters;
   BluetoothInfo? get connectedPrinter => _connectedPrinter;
+  
+  @override
   bool get isConnected => _isConnected;
+  
+  @override
   String get connectionStatus => _connectionStatus;
+  
+  @override
   int get paperSize => _paperSize;
 
   // Check if Bluetooth is available and enabled
-  Future<bool> checkBluetoothAvailability() async {
+  @override
+  Future<bool> checkAvailability() async {
     try {
       final bool result = await PrintBluetoothThermal.bluetoothEnabled;
       if (!result) {
@@ -34,12 +45,13 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Scan for available Bluetooth printers
+  @override
   Future<void> scanForPrinters() async {
     try {
       _connectionStatus = 'Scanning for printers...';
       notifyListeners();
 
-      final bool isAvailable = await checkBluetoothAvailability();
+      final bool isAvailable = await checkAvailability();
       if (!isAvailable) {
         _connectionStatus = 'Please enable Bluetooth';
         notifyListeners();
@@ -58,6 +70,21 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Connect to a specific printer
+  @override
+  Future<bool> connect() async {
+    // For Bluetooth, we need a specific printer - use connectToPrinter instead
+    if (_availablePrinters.isEmpty) {
+      await scanForPrinters();
+    }
+    if (_availablePrinters.isEmpty) {
+      _connectionStatus = 'No printers found';
+      notifyListeners();
+      return false;
+    }
+    return await connectToPrinter(_availablePrinters.first);
+  }
+
+  // Connect to a specific Bluetooth printer
   Future<bool> connectToPrinter(BluetoothInfo printer) async {
     try {
       _connectionStatus = 'Connecting to ${printer.name}...';
@@ -84,6 +111,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Disconnect from printer
+  @override
   Future<void> disconnect() async {
     try {
       await PrintBluetoothThermal.disconnect;
@@ -98,6 +126,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Set paper size (58mm or 80mm)
+  @override
   void setPaperSize(int size) {
     if (size == 58 || size == 80) {
       _paperSize = size;
@@ -106,6 +135,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Print test receipt
+  @override
   Future<bool> printTestReceipt({String? storeName}) async {
     if (!_isConnected) {
       _connectionStatus = 'Please connect to a printer first';
@@ -184,6 +214,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Print actual sales receipt
+  @override
   Future<bool> printReceipt({
     required String receiptNumber,
     required DateTime saleDate,
@@ -279,6 +310,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   }
 
   // Check current connection status
+  @override
   Future<void> checkConnectionStatus() async {
     try {
       final bool status = await PrintBluetoothThermal.connectionStatus;
