@@ -21,4 +21,5 @@
     <color name="errorColor">#F44336</color>
     <color name="warningColor">#FF9800</color>
     <color name="infoColor">#2196F3</color>
+	<color name="ic_launcher_background">#FFFFFF</color>
 </resources>

@@ -119,6 +119,63 @@ class SetupStatusModel extends ChangeNotifier {
   }
 }
 
+enum BusinessMode { shop, butchery }
+
+String businessModeLabel(BusinessMode mode) {
+  return mode == BusinessMode.butchery ? 'Butchery' : 'Shop';
+}
+
+String formatDecimal(num value, {int decimals = 2}) {
+  final asDouble = value.toDouble();
+  if ((asDouble - asDouble.roundToDouble()).abs() < 0.000001) {
+    return asDouble.round().toString();
+  }
+  final fixed = asDouble.toStringAsFixed(decimals);
+  return fixed.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
+}
+
+String formatQuantityDisplay(double qty, {required bool isWeight}) {
+  final formatted = formatDecimal(qty, decimals: 3);
+  return isWeight ? '$formatted kg' : formatted;
+}
+
+double asDouble(dynamic value, {double fallback = 0.0}) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? fallback;
+  return fallback;
+}
+
+class BusinessModeModel extends ChangeNotifier {
+  BusinessMode _mode = BusinessMode.shop;
+  bool _hasSelection = false;
+  static const _modeKey = 'business_mode';
+
+  BusinessMode get mode => _mode;
+  bool get isButchery => _mode == BusinessMode.butchery;
+  bool get hasSelection => _hasSelection;
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_modeKey);
+    if (raw == null || raw.trim().isEmpty) {
+      _hasSelection = false;
+      return;
+    }
+
+    _mode = raw == 'butchery' ? BusinessMode.butchery : BusinessMode.shop;
+    _hasSelection = true;
+    notifyListeners();
+  }
+
+  Future<void> update(BusinessMode mode) async {
+    _mode = mode;
+    _hasSelection = true;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_modeKey, mode == BusinessMode.butchery ? 'butchery' : 'shop');
+    notifyListeners();
+  }
+}
+
 // ================== APP ENTRY ==================
 void main() {
   runApp(const ShopaFlowApp());
@@ -135,6 +192,7 @@ class ShopaFlowApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ExchangeRateModel()),
         ChangeNotifierProvider(create: (_) => ThemeModel()),
         ChangeNotifierProvider(create: (_) => SetupStatusModel()),
+        ChangeNotifierProvider(create: (_) => BusinessModeModel()),
         ChangeNotifierProvider(create: (_) => PrinterManager()),
         Provider(create: (_) => DatabaseService()),
         // Add other providers here if needed
@@ -271,6 +329,7 @@ class SplashScreen extends StatefulWidget {
 class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _fade;
+  Timer? _navigationTimer;
   @override
   void initState() {
     super.initState();
@@ -285,17 +344,32 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
     await context.read<ExchangeRateModel>().load();
     await context.read<ThemeModel>().load();
     await context.read<SetupStatusModel>().load();
+    await context.read<BusinessModeModel>().load();
+
+    if (!mounted) {
+      return;
+    }
     
     // Navigate after loading
-    Timer(const Duration(seconds: 2), () {
+    _navigationTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted) {
+        return;
+      }
       final isSetupCompleted = context.read<SetupStatusModel>().isSetupCompleted;
+      final Widget nextScreen = isSetupCompleted ? const MainScreen() : const SetupWizardScreen();
+
       Navigator.pushReplacement(
         context, 
         MaterialPageRoute(
-          builder: (_) => isSetupCompleted ? const MainScreen() : const SetupWizardScreen()
+          builder: (_) => BusinessModeSelectionScreen(nextScreen: nextScreen),
         )
       );
-    });
+        @override
+        void dispose() {
+          _navigationTimer?.cancel();
+          _controller.dispose();
+          super.dispose();
+        }
   }
 
   @override
@@ -327,6 +401,133 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class BusinessModeSelectionScreen extends StatefulWidget {
+  final Widget nextScreen;
+  const BusinessModeSelectionScreen({super.key, required this.nextScreen});
+
+  @override
+  State<BusinessModeSelectionScreen> createState() => _BusinessModeSelectionScreenState();
+}
+
+class _BusinessModeSelectionScreenState extends State<BusinessModeSelectionScreen> {
+  late BusinessMode _selected;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = context.read<BusinessModeModel>().mode;
+  }
+
+  Future<void> _continue() async {
+    setState(() => _saving = true);
+    await context.read<BusinessModeModel>().update(_selected);
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => widget.nextScreen),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Choose Business Type'),
+        backgroundColor: primary,
+        foregroundColor: Colors.white,
+        automaticallyImplyLeading: false,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Select how you want to run this POS',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text('You can change this later from Settings.'),
+            const SizedBox(height: 20),
+            Expanded(
+              child: ListView(
+                children: [
+                  _buildModeCard(
+                    mode: BusinessMode.shop,
+                    icon: Icons.storefront,
+                    title: 'Shop Mode',
+                    subtitle: 'Whole-number quantities (1, 2, 3...) for regular retail items.',
+                  ),
+                  const SizedBox(height: 12),
+                  _buildModeCard(
+                    mode: BusinessMode.butchery,
+                    icon: Icons.set_meal,
+                    title: 'Butchery Mode',
+                    subtitle: 'Fractional quantities in kilograms (for example 0.25 kg, 0.5 kg, 1.75 kg).',
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _saving ? null : _continue,
+                icon: const Icon(Icons.arrow_forward),
+                label: Text(_saving ? 'Saving...' : 'Continue'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeCard({
+    required BusinessMode mode,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    final selected = _selected == mode;
+    final primary = Theme.of(context).colorScheme.primary;
+    return InkWell(
+      onTap: () => setState(() => _selected = mode),
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: selected ? primary : Colors.grey.shade300, width: selected ? 2 : 1),
+          color: selected ? primary.withOpacity(0.08) : Colors.white,
+        ),
+        child: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: selected ? primary : Colors.grey.shade200,
+              foregroundColor: selected ? Colors.white : Colors.black87,
+              child: Icon(icon),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                  const SizedBox(height: 6),
+                  Text(subtitle),
+                ],
+              ),
+            ),
+            if (selected) Icon(Icons.check_circle, color: primary),
+          ],
         ),
       ),
     );
@@ -705,12 +906,13 @@ class _MainScreenState extends State<MainScreen> {
   Widget build(BuildContext context) {
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
     final store = context.watch<StoreInfoModel>();
+    final businessMode = context.watch<BusinessModeModel>();
     return Scaffold(
       appBar: AppBar(
         title: Row(children: [
-          const Icon(Icons.storefront, color: Colors.white),
+          Icon(businessMode.isButchery ? Icons.set_meal : Icons.storefront, color: Colors.white),
           const SizedBox(width: 8),
-          Text(store.name, style: const TextStyle(color: Colors.white)),
+          Text('${store.name} • ${businessModeLabel(businessMode.mode)}', style: const TextStyle(color: Colors.white)),
         ]),
         actions: [
           Consumer<ExchangeRateModel>(
@@ -771,6 +973,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool _showCart = true; // cart visibility
   List<Map<String, dynamic>> _products = [];
   late DatabaseService db;
+
+  BusinessModeModel get _businessMode => context.read<BusinessModeModel>();
+  bool get _isButchery => _businessMode.isButchery;
+  double get _quantityStep => _isButchery ? 0.25 : 1.0;
 
   Future<void> _printReceipt(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
     try {
@@ -863,41 +1069,167 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
   }
 
-  double get totalUSD => _cartNotifier.value.fold(0.0, (s, i) => s + (i['price'] as num) * (i['qty'] as int));
+  double get totalUSD => _cartNotifier.value.fold(0.0, (s, i) => s + asDouble(i['price']) * asDouble(i['qty']));
 
-  void _add(Map<String, dynamic> p) {
+  Future<double?> _showKgInputDialog({
+    required String productName,
+    required double maxKg,
+    double? initialKg,
+    String actionLabel = 'Add',
+  }) async {
+    final controller = TextEditingController(
+      text: initialKg != null ? formatDecimal(initialKg, decimals: 3) : '',
+    );
+    final value = await showDialog<double>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setStateDialog) {
+          String? error;
+
+          void submit() {
+            final parsed = double.tryParse(controller.text.trim());
+            if (parsed == null || parsed <= 0) {
+              setStateDialog(() => error = 'Enter a valid kg amount');
+              return;
+            }
+            if (parsed > maxKg + 0.000001) {
+              setStateDialog(() => error = 'Cannot exceed available stock (${formatDecimal(maxKg, decimals: 3)} kg)');
+              return;
+            }
+            Navigator.pop(context, parsed);
+          }
+
+          return AlertDialog(
+            title: Text('$actionLabel Weight'),
+            content: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(productName, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Text('Available: ${formatDecimal(maxKg, decimals: 3)} kg'),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Weight (kg)',
+                      hintText: 'Example: 0.75',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => submit(),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [0.25, 0.5, 0.75, 1.0, 2.0].map((q) {
+                      return ActionChip(
+                        label: Text('${formatDecimal(q, decimals: 2)} kg'),
+                        onPressed: () => controller.text = q.toString(),
+                      );
+                    }).toList(),
+                  ),
+                  if (error != null) ...[
+                    const SizedBox(height: 10),
+                    Text(error!, style: const TextStyle(color: Colors.red)),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              ElevatedButton(onPressed: submit, child: Text(actionLabel)),
+            ],
+          );
+        },
+      ),
+    );
+    controller.dispose();
+    return value;
+  }
+
+  Future<void> _add(Map<String, dynamic> p) async {
     final newCart = List<Map<String, dynamic>>.from(_cartNotifier.value);
     final idx = newCart.indexWhere((c) => c['id'] == p['id']);
-    final stock = (p['stock_quantity'] ?? p['stock'] ?? 0) as int;
+    final stock = asDouble(p['stock_quantity'] ?? p['stock'] ?? 0);
 
     if (idx == -1) {
       if (stock <= 0) {
         _snack('Out of stock');
         return;
       }
-      newCart.add({'id': p['id'], 'name': p['name'], 'price': p['price'], 'qty': 1, 'stock': stock});
+      double qtyToAdd = _quantityStep;
+      if (_isButchery) {
+        final entered = await _showKgInputDialog(
+          productName: p['name']?.toString() ?? 'Item',
+          maxKg: stock,
+          actionLabel: 'Add',
+        );
+        if (entered == null) return;
+        qtyToAdd = entered;
+      }
+      newCart.add({'id': p['id'], 'name': p['name'], 'price': p['price'], 'qty': qtyToAdd, 'stock': stock});
     } else {
-      if (newCart[idx]['qty'] >= stock) {
+      double qtyIncrement = _quantityStep;
+      if (_isButchery) {
+        final currentQty = asDouble(newCart[idx]['qty']);
+        final remaining = stock - currentQty;
+        if (remaining <= 0.000001) {
+          _snack('Max stock reached');
+          return;
+        }
+        final entered = await _showKgInputDialog(
+          productName: p['name']?.toString() ?? 'Item',
+          maxKg: remaining,
+          actionLabel: 'Add',
+        );
+        if (entered == null) return;
+        qtyIncrement = entered;
+      }
+      final nextQty = asDouble(newCart[idx]['qty']) + qtyIncrement;
+      if (nextQty > stock + 0.000001) {
         _snack('Max stock reached');
         return;
       }
-      newCart[idx] = {...newCart[idx], 'qty': (newCart[idx]['qty'] as int) + 1};
+      newCart[idx] = {...newCart[idx], 'qty': nextQty};
     }
     _cartNotifier.value = newCart;
     setState(() => _showCart = true);
   }
 
-  void _changeQty(int index, int delta) {
+  Future<void> _setButcheryQty(int index) async {
+    if (!_isButchery) return;
     final newCart = List<Map<String, dynamic>>.from(_cartNotifier.value);
     if (index >= newCart.length) return;
     final item = newCart[index];
-    final newQty = (item['qty'] as int) + delta;
-    final stock = (item['stock'] as int);
-    if (newQty > stock) {
+    final stock = asDouble(item['stock']);
+    final currentQty = asDouble(item['qty']);
+    final entered = await _showKgInputDialog(
+      productName: item['name']?.toString() ?? 'Item',
+      maxKg: stock,
+      initialKg: currentQty,
+      actionLabel: 'Set',
+    );
+    if (entered == null) return;
+    newCart[index] = {...item, 'qty': entered};
+    _cartNotifier.value = newCart;
+  }
+
+  void _changeQty(int index, double delta) {
+    final newCart = List<Map<String, dynamic>>.from(_cartNotifier.value);
+    if (index >= newCart.length) return;
+    final item = newCart[index];
+    final newQty = asDouble(item['qty']) + delta;
+    final stock = asDouble(item['stock']);
+    if (newQty > stock + 0.000001) {
       _snack('Max stock reached');
       return;
     }
-    if (newQty <= 0) {
+    if (newQty <= 0.000001) {
       newCart.removeAt(index);
     } else {
       newCart[index] = {...item, 'qty': newQty};
@@ -935,7 +1267,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'product_id': c['id'],
       'quantity': c['qty'],
       'unit_price': c['price'],
-      'total_price': (c['price'] as num) * (c['qty'] as num)
+      'total_price': asDouble(c['price']) * asDouble(c['qty'])
     })).toList();
     
     // Create items with names for printing
@@ -944,7 +1276,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'name': c['name'],
       'quantity': c['qty'],
       'unit_price': c['price'],
-      'total_price': (c['price'] as num) * (c['qty'] as num)
+      'total_price': asDouble(c['price']) * asDouble(c['qty'])
     })).toList();
     
   await db.addSale(sale, items);
@@ -953,7 +1285,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     for (final c in _cartNotifier.value) {
       final prodIdx = _products.indexWhere((p) => p['id'] == c['id']);
       if (prodIdx != -1) {
-        _products[prodIdx]['stock_quantity'] = (_products[prodIdx]['stock_quantity'] as int) - (c['qty'] as int);
+        _products[prodIdx]['stock_quantity'] = asDouble(_products[prodIdx]['stock_quantity']) - asDouble(c['qty']);
       }
     }
     _cartNotifier.value = [];
@@ -1046,20 +1378,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if(listMode){
       return ListView.builder(padding: const EdgeInsets.all(12), itemCount: data.length, itemBuilder: (_,i){
         final p = data[i];
-        final stock = (p['stock_quantity'] ?? 0) as int;
-        final low = stock < (p['min_stock_level']??5);
+        final stock = asDouble(p['stock_quantity'] ?? 0);
+        final minStock = asDouble(p['min_stock_level'] ?? 5);
+        final low = stock < minStock;
         return Card(
           elevation: 1,
           margin: const EdgeInsets.only(bottom: 8),
           child: ListTile(
             leading: CircleAvatar(backgroundColor: low? Colors.orange.shade100: Colors.green.shade100, child: Text(p['name'].toString().characters.first.toUpperCase())),
             title: Text(p['name']??'', style: const TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: Text('Stock: $stock • ${p['category']??'No Cat'}'),
+                      subtitle: Text('Stock: ${formatQuantityDisplay(stock, isWeight: _isButchery)} • ${p['category']??'No Cat'}', maxLines: 1, overflow: TextOverflow.ellipsis),
             trailing: Wrap(
               spacing: 6,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text('\$${(p['price'] as num).toStringAsFixed(2)}', style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 14)),
+                Text(
+                  _isButchery ? '\$${asDouble(p['price']).toStringAsFixed(2)}/kg' : '\$${asDouble(p['price']).toStringAsFixed(2)}',
+                  style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 14),
+                ),
                 if (stock > 0)
                   IconButton(onPressed: ()=> _add(p), icon: const Icon(Icons.add_circle_outline))
                 else
@@ -1085,7 +1421,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       itemCount: data.length,
       itemBuilder: (_, i) {
         final p = data[i];
-        final stock = (p['stock_quantity'] ?? 0) as int;
+        final stock = asDouble(p['stock_quantity'] ?? 0);
         final outOfStock = stock <= 0;
         return Card(
           clipBehavior: Clip.antiAlias,
@@ -1109,7 +1445,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     children: [
                       Text(p['name']??'', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
                       const SizedBox(height: 4),
-                      Text('\$${(p['price'] as num).toStringAsFixed(2)} • Stock: $stock', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                      Text(
+                        _isButchery
+                            ? '\$${asDouble(p['price']).toStringAsFixed(2)}/kg • Stock: ${formatQuantityDisplay(stock, isWeight: true)}'
+                            : '\$${asDouble(p['price']).toStringAsFixed(2)} • Stock: ${formatQuantityDisplay(stock, isWeight: false)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, color: Colors.black54),
+                      ),
                     ],
                   ),
                 ),
@@ -1159,7 +1502,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Widget _buildCartItem(Map<String, dynamic> item, int index) {
-    final qty = (item['qty'] as num?)?.toInt() ?? 0;
+    final qty = asDouble(item['qty']);
     final price = (item['price'] as num?)?.toDouble() ?? 0.0;
     final itemId = item['id'];
     return Card(
@@ -1188,7 +1531,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 children: [
                   Text(item['name']?.toString() ?? '', style: const TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
-                  Text('\$${price.toStringAsFixed(2)} each', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                  Text(
+                    _isButchery ? '\$${price.toStringAsFixed(2)} per kg' : '\$${price.toStringAsFixed(2)} each',
+                    style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
                 ],
               ),
             ),
@@ -1201,20 +1547,30 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton(
-                    onPressed: () => _changeQty(index, -1),
+                    onPressed: () => _changeQty(index, -_quantityStep),
                     icon: const Icon(Icons.remove_circle_outline, size: 20),
                     constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                     padding: EdgeInsets.zero,
                   ),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Text(
-                      '$qty',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    child: InkWell(
+                      onTap: _isButchery ? () => _setButcheryQty(index) : null,
+                      borderRadius: BorderRadius.circular(6),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                        child: Text(
+                          formatQuantityDisplay(qty, isWeight: _isButchery),
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            decoration: _isButchery ? TextDecoration.underline : TextDecoration.none,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                   IconButton(
-                    onPressed: () => _changeQty(index, 1),
+                    onPressed: () => _changeQty(index, _quantityStep),
                     icon: const Icon(Icons.add_circle_outline, size: 20),
                     constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                     padding: EdgeInsets.zero,
@@ -1224,7 +1580,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
             const SizedBox(width: 8),
             SizedBox(
-              width: 70,
+              width: 64,
               child: Text(
                 '\$${(price * qty).toStringAsFixed(2)}',
                 textAlign: TextAlign.end,
@@ -1244,8 +1600,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Widget _cartTotals(double rate, List<Map<String, dynamic>> cart) {
-    final totalItems = cart.fold<int>(0, (s, i) => s + ((i['qty'] as num?)?.toInt() ?? 0));
-    final currentTotalUSD = cart.fold(0.0, (s, i) => s + (i['price'] as num) * (i['qty'] as int));
+    final totalItems = cart.fold<double>(0, (s, i) => s + asDouble(i['qty']));
+    final currentTotalUSD = cart.fold(0.0, (s, i) => s + asDouble(i['price']) * asDouble(i['qty']));
     return Material(
       elevation: 10,
       child: Container(
@@ -1260,8 +1616,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 200),
                 child: Text(
-                  'Subtotal ($totalItems items)',
-                  key: ValueKey(totalItems),
+                  _isButchery
+                      ? 'Subtotal (${formatQuantityDisplay(totalItems, isWeight: true)})'
+                      : 'Subtotal (${formatDecimal(totalItems)} items)',
+                  key: ValueKey(totalItems.toStringAsFixed(3)),
                   style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
                 ),
               ),
@@ -1345,6 +1703,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       valueListenable: _cartNotifier,
       builder: (context, cart, _) {
         final preview = cart.take(3).map((e) => e['name']).join(', ');
+        final totalQty = cart.fold<double>(0, (s, i) => s + asDouble(i['qty']));
         return Positioned(
           bottom: 0,
           left: 0,
@@ -1376,7 +1735,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        cart.isEmpty ? 'Cart is empty' : '${cart.length} items • $preview',
+                        cart.isEmpty
+                            ? 'Cart is empty'
+                            : _isButchery
+                                ? '${formatQuantityDisplay(totalQty, isWeight: true)} • $preview'
+                                : '${formatDecimal(totalQty)} items • $preview',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(color: Colors.white),
@@ -1424,6 +1787,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _saveStore() async { final store = context.read<StoreInfoModel>(); await store.updateName(_nameCtrl.text); await store.updateAddress(_addrCtrl.text); if(!mounted) return; ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Store info saved'))); }
   Future<void> _saveRate() async { final rateModel = context.read<ExchangeRateModel>(); final v = double.tryParse(_rateCtrl.text); if(v==null || v<=0){ ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invalid rate'))); return; } await rateModel.update(v); if(!mounted) return; ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Rate updated'))); }
 
+  Future<void> _changeBusinessMode(BusinessMode mode) async {
+    final businessMode = context.read<BusinessModeModel>();
+    if (businessMode.mode == mode) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Switch Business Mode'),
+        content: Text(
+          mode == BusinessMode.butchery
+              ? 'Switch to Butchery mode? Quantity controls will allow fractional kilograms.'
+              : 'Switch to Shop mode? Quantity controls will use whole-item increments.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Switch')),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    await businessMode.update(mode);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Business mode changed to ${businessModeLabel(mode)}')),
+    );
+  }
+
   Future<void> _exportData() async {
     setState(()=> _busy = true);
     final db = context.read<DatabaseService>();
@@ -1442,6 +1833,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final businessMode = context.watch<BusinessModeModel>();
     return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
       const Text('Settings', style: TextStyle(fontSize:24, fontWeight: FontWeight.bold)), const SizedBox(height:16),
       _section('Store Information', [
@@ -1464,6 +1856,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _section('Currency & Rates', [
         TextField(controller: _rateCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'USD -> ZWL Rate', border: OutlineInputBorder())), const SizedBox(height:12),
         ElevatedButton(onPressed: _saveRate, child: const Text('Update Rate')),
+      ]),
+      const SizedBox(height:24),
+      _section('Business Mode', [
+        const Text('Select operating mode', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 10),
+        RadioListTile<BusinessMode>(
+          value: BusinessMode.shop,
+          groupValue: businessMode.mode,
+          title: const Text('Shop'),
+          subtitle: const Text('Whole-item quantities (1, 2, 3...)'),
+          onChanged: (mode) {
+            if (mode != null) {
+              _changeBusinessMode(mode);
+            }
+          },
+        ),
+        RadioListTile<BusinessMode>(
+          value: BusinessMode.butchery,
+          groupValue: businessMode.mode,
+          title: const Text('Butchery'),
+          subtitle: const Text('Fractional quantities in kg (for example 0.25, 0.5, 1.75)'),
+          onChanged: (mode) {
+            if (mode != null) {
+              _changeBusinessMode(mode);
+            }
+          },
+        ),
       ]),
       const SizedBox(height:24),
       _section('App Appearance', [
@@ -1551,8 +1970,8 @@ class _AddProductDialogState extends State<AddProductDialog>{
       'description': _desc.text.trim(),
       'price': double.parse(_price.text),
       'cost': double.tryParse(_cost.text)??0,
-      'stock': int.parse(_stock.text),
-      'min_stock': int.parse(_minStock.text),
+      'stock': double.parse(_stock.text),
+      'min_stock': double.parse(_minStock.text),
       'barcode': _barcode.text.trim(),
       'category': _category.text.trim(),
       'sku': _sku.text.trim(),
@@ -1561,14 +1980,15 @@ class _AddProductDialogState extends State<AddProductDialog>{
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(title: Text(widget.product==null? 'Add Product':'Edit Product'), content: SizedBox(width: 400, child: Form(key: _form, child: SingleChildScrollView(child: Column(children:[
+    final isButchery = context.watch<BusinessModeModel>().isButchery;
+    return AlertDialog(title: Text(widget.product==null? 'Add Product':'Edit Product'), content: ConstrainedBox(constraints: BoxConstraints(maxWidth: 400), child: Form(key: _form, child: SingleChildScrollView(child: Column(children:[
       TextFormField(controller: _name, decoration: const InputDecoration(labelText: 'Name'), validator: (v)=> v==null||v.trim().isEmpty? 'Required': null),
       const SizedBox(height:8),
       TextFormField(controller: _desc, decoration: const InputDecoration(labelText: 'Description')),
       const SizedBox(height:8),
       Row(children:[ Expanded(child: TextFormField(controller: _price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Price'), validator: (v)=> double.tryParse(v??'')==null? 'Number': null)), const SizedBox(width:8), Expanded(child: TextFormField(controller: _cost, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Cost'))) ]),
       const SizedBox(height:8),
-      Row(children:[ Expanded(child: TextFormField(controller: _stock, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Stock'), validator: (v)=> int.tryParse(v??'')==null? 'Int': null)), const SizedBox(width:8), Expanded(child: TextFormField(controller: _minStock, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Min Stock'))) ]),
+      Row(children:[ Expanded(child: TextFormField(controller: _stock, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: isButchery ? 'Stock (kg)' : 'Stock'), validator: (v)=> double.tryParse(v??'')==null? 'Number': null)), const SizedBox(width:8), Expanded(child: TextFormField(controller: _minStock, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: isButchery ? 'Min Stock (kg)' : 'Min Stock'), validator: (v)=> double.tryParse(v??'')==null? 'Number': null)) ]),
       const SizedBox(height:8),
       TextFormField(controller: _barcode, decoration: const InputDecoration(labelText: 'Barcode (Optional)', hintText: 'Leave blank if not available')),
       const SizedBox(height:8),
@@ -1973,7 +2393,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
           await _db.addProduct({
             'name': name, 'description': row.length > 1 ? row[1]?.toString().trim() : '',
             'price': double.tryParse(row[2]?.toString() ?? '0') ?? 0, 'cost': row.length > 3 ? (double.tryParse(row[3]?.toString() ?? '0') ?? 0) : 0,
-            'stock_quantity': int.tryParse(row[4]?.toString() ?? '0') ?? 0, 'min_stock_level': row.length > 5 ? (int.tryParse(row[5]?.toString() ?? '5') ?? 5) : 5,
+            'stock_quantity': double.tryParse(row[4]?.toString() ?? '0') ?? 0, 'min_stock_level': row.length > 5 ? (double.tryParse(row[5]?.toString() ?? '5') ?? 5) : 5,
             'barcode': (barcodeValue == null || barcodeValue.isEmpty) ? null : barcodeValue,
             'category': row.length > 7 ? row[7]?.toString().trim() : '', 
             'sku': (skuValue == null || skuValue.isEmpty) ? null : skuValue,
@@ -1999,6 +2419,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isButchery = context.watch<BusinessModeModel>().isButchery;
     return Scaffold(
       body: Column(
         children: [
@@ -2028,14 +2449,15 @@ class _ProductsScreenState extends State<ProductsScreen> {
               itemCount: _filteredProducts.length,
               itemBuilder: (context, index) {
                 final p = _filteredProducts[index];
-                final stock = (p['stock_quantity'] ?? 0) as int;
-                final low = stock < (p['min_stock_level']??5);
+                final stock = asDouble(p['stock_quantity'] ?? 0);
+                final minStock = asDouble(p['min_stock_level'] ?? 5);
+                final low = stock < minStock;
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: ListTile(
                     leading: CircleAvatar(backgroundColor: low ? Colors.orange.shade100 : Colors.green.shade100, child: Text(p['name']?.toString().characters.first.toUpperCase() ?? '?')),
                     title: Text(p['name']?.toString() ?? ''),
-                    subtitle: Text('Stock: $stock • ${p['category'] ?? 'No Cat'}'),
+                    subtitle: Text('Stock: ${formatQuantityDisplay(stock, isWeight: isButchery)} • ${p['category'] ?? 'No Cat'}', maxLines: 1, overflow: TextOverflow.ellipsis),
                     trailing: Wrap(spacing: 8, children: [
                       IconButton(onPressed: () => _addOrEdit(p), icon: const Icon(Icons.edit)),
                       IconButton(onPressed: () => _deleteProduct(p), icon: const Icon(Icons.delete, color: Colors.red)),
@@ -2064,6 +2486,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
   Map<String, dynamic> _salesData = {};
   List<Map<String, dynamic>> _recentSales = [];
   Map<String, dynamic> _inventoryData = {};
+  int _todayTransactions = 0;
 
   @override
   void initState() {
@@ -2100,6 +2523,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
       double weekSales = 0;
       double monthSales = 0;
       double totalSales = 0;
+      int todayTransactions = 0;
 
       Map<String, int> paymentMethods = {};
 
@@ -2108,7 +2532,10 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
         final amount = (sale['total_amount'] as num).toDouble();
         totalSales += amount;
 
-        if (saleDate.isAfter(startOfDay)) todaySales += amount;
+        if (saleDate.isAfter(startOfDay)) {
+          todaySales += amount;
+          todayTransactions++;
+        }
         if (saleDate.isAfter(startOfWeek)) weekSales += amount;
         if (saleDate.isAfter(startOfMonth)) monthSales += amount;
 
@@ -2124,8 +2551,8 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
       double totalInventoryValue = 0;
 
       for (final product in products) {
-        final stock = product['stock_quantity'] as int? ?? 0;
-        final minStock = product['min_stock_level'] as int? ?? 5;
+        final stock = asDouble(product['stock_quantity'] ?? 0);
+        final minStock = asDouble(product['min_stock_level'] ?? 5);
         final cost = (product['cost'] as num?)?.toDouble() ?? 0;
 
         totalInventoryValue += stock * cost;
@@ -2155,6 +2582,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
         };
 
         _recentSales = sales.take(10).toList();
+        _todayTransactions = todayTransactions;
         _loading = false;
       });
     } catch (e) {
@@ -2203,9 +2631,10 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
               itemCount: items.length,
               itemBuilder: (context, index) {
                 final item = items[index];
+                final isButchery = context.read<BusinessModeModel>().isButchery;
                 return ListTile(
                   title: Text(item['product_name']?.toString() ?? 'Unknown'),
-                  subtitle: Text('Qty: ${item['quantity']} @ \$${(item['unit_price'] as num).toStringAsFixed(2)}'),
+                  subtitle: Text('Qty: ${formatQuantityDisplay(asDouble(item['quantity']), isWeight: isButchery)} @ \$${asDouble(item['unit_price']).toStringAsFixed(2)}'),
                   trailing: Text('\$${(item['total_price'] as num).toStringAsFixed(2)}'),
                 );
               },
@@ -2254,6 +2683,9 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
 
   Widget _buildSalesTab() {
     final payment = (_salesData['paymentMethods'] as Map<String, int>? ) ?? {};
+    final todaySales = asDouble(_salesData['today']);
+    final averageTicket = _todayTransactions > 0 ? todaySales / _todayTransactions : 0.0;
+    final modeLabel = businessModeLabel(context.watch<BusinessModeModel>().mode);
     return RefreshIndicator(
       onRefresh: _loadReportsData,
       child: SingleChildScrollView(
@@ -2283,6 +2715,26 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    Text('End of Day Snapshot ($modeLabel)', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Today\'s transactions'),
+                        Text('$_todayTransactions'),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Average ticket'),
+                        Text('\$${averageTicket.toStringAsFixed(2)}'),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    const Divider(),
+                    const SizedBox(height: 4),
                     const Text('Payment Methods', style: TextStyle(fontWeight: FontWeight.bold)),
                     const SizedBox(height: 12),
                     if (payment.isEmpty) const Text('No data') else ...payment.entries.map((e) => Padding(
@@ -2306,6 +2758,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
   }
 
   Widget _buildInventoryTab() {
+    final isButchery = context.watch<BusinessModeModel>().isButchery;
     return RefreshIndicator(
       onRefresh: _loadReportsData,
       child: SingleChildScrollView(
@@ -2322,9 +2775,9 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
               childAspectRatio: 1.5,
               children: [
                 _buildMetricCard('Products', (_inventoryData['totalProducts'] ?? 0).toString(), Icons.inventory, Colors.blueGrey),
-                _buildMetricCard('Low Stock', (_inventoryData['lowStock'] ?? 0).toString(), Icons.warning_amber, Colors.orange),
+                _buildMetricCard(isButchery ? 'Low Stock Items' : 'Low Stock', (_inventoryData['lowStock'] ?? 0).toString(), Icons.warning_amber, Colors.orange),
                 _buildMetricCard('Out of Stock', (_inventoryData['outOfStock'] ?? 0).toString(), Icons.block, Colors.redAccent),
-                _buildMetricCard('Inventory Value', 'ZWL ${(_inventoryData['totalValue'] ?? 0).toStringAsFixed(2)}', Icons.price_change, Colors.green),
+                _buildMetricCard('Inventory Value', 'ZWL ${asDouble(_inventoryData['totalValue']).toStringAsFixed(2)}', Icons.price_change, Colors.green),
               ],
             ),
           ],

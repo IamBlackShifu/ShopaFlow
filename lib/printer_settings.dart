@@ -280,7 +280,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                                 ),
                         ),
                       );
-                    }).toList(),
+                    }),
                   ],
                 ] else if (printerManager.selectedType == PrinterType.sunmi) ...[
                   // Sunmi Connect Button
@@ -300,7 +300,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                   
                   Card(
                     color: Colors.blue[50],
-                    child: Padding(
+                    child: const Padding(
                       padding: EdgeInsets.all(16.0),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,

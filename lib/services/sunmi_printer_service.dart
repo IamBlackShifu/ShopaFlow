@@ -184,7 +184,8 @@ class SunmiPrinterService extends ChangeNotifier implements PrinterServiceInterf
       // Items
       for (var item in items) {
         final name = (item['name'] ?? '').toString();
-        final qty = (item['quantity'] ?? 1).toString();
+        final qtyValue = (item['quantity'] as num?)?.toDouble() ?? 1.0;
+        final qty = qtyValue == qtyValue.roundToDouble() ? qtyValue.toStringAsFixed(0) : qtyValue.toStringAsFixed(3).replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
         final price = '£${(item['total_price'] ?? 0.0).toStringAsFixed(2)}';
         
         // Format as: Name (15 chars) Qty (4 chars) Price (13 chars right-aligned)

@@ -14,8 +14,9 @@ class DatabaseService {
     String path = join(await getDatabasesPath(), 'shopaflow.db');
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -28,8 +29,8 @@ class DatabaseService {
         description TEXT,
         price REAL NOT NULL,
         cost REAL,
-        stock_quantity INTEGER NOT NULL DEFAULT 0,
-        min_stock_level INTEGER DEFAULT 0,
+        stock_quantity REAL NOT NULL DEFAULT 0,
+        min_stock_level REAL DEFAULT 0,
         barcode TEXT,
         category TEXT,
         sku TEXT,
@@ -56,7 +57,7 @@ class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sale_id INTEGER NOT NULL,
         product_id INTEGER NOT NULL,
-        quantity INTEGER NOT NULL,
+        quantity REAL NOT NULL,
         unit_price REAL NOT NULL,
         total_price REAL NOT NULL,
         FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
@@ -75,6 +76,63 @@ class DatabaseService {
         created_at TEXT
       )
     ''');
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.transaction((txn) async {
+        await txn.execute('ALTER TABLE products RENAME TO products_old');
+        await txn.execute('''
+          CREATE TABLE products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            price REAL NOT NULL,
+            cost REAL,
+            stock_quantity REAL NOT NULL DEFAULT 0,
+            min_stock_level REAL DEFAULT 0,
+            barcode TEXT,
+            category TEXT,
+            sku TEXT,
+            created_at TEXT,
+            updated_at TEXT
+          )
+        ''');
+        await txn.execute('''
+          INSERT INTO products (
+            id, name, description, price, cost, stock_quantity, min_stock_level,
+            barcode, category, sku, created_at, updated_at
+          )
+          SELECT
+            id, name, description, price, cost,
+            CAST(stock_quantity AS REAL),
+            CAST(min_stock_level AS REAL),
+            barcode, category, sku, created_at, updated_at
+          FROM products_old
+        ''');
+        await txn.execute('DROP TABLE products_old');
+
+        await txn.execute('ALTER TABLE sale_items RENAME TO sale_items_old');
+        await txn.execute('''
+          CREATE TABLE sale_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            unit_price REAL NOT NULL,
+            total_price REAL NOT NULL,
+            FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
+            FOREIGN KEY (product_id) REFERENCES products (id)
+          )
+        ''');
+        await txn.execute('''
+          INSERT INTO sale_items (id, sale_id, product_id, quantity, unit_price, total_price)
+          SELECT id, sale_id, product_id, CAST(quantity AS REAL), unit_price, total_price
+          FROM sale_items_old
+        ''');
+        await txn.execute('DROP TABLE sale_items_old');
+      });
+    }
   }
 
   // Product methods
@@ -137,7 +195,12 @@ class DatabaseService {
         
         // Update product stock
         final productId = item['product_id'];
-        final quantity = item['quantity'];
+        double quantity;
+        if (item['quantity'] is num) {
+          quantity = (item['quantity'] as num).toDouble();
+        } else {
+          quantity = double.tryParse(item['quantity']?.toString() ?? '') ?? 0.0;
+        }
         await txn.rawUpdate(
           'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?',
           [quantity, productId],
@@ -168,11 +231,13 @@ class DatabaseService {
 
   Future<List<Map<String, dynamic>>> getSaleItems(int saleId) async {
     final db = await database;
-    return await db.query(
-      'sale_items',
-      where: 'sale_id = ?',
-      whereArgs: [saleId],
-    );
+    return await db.rawQuery('''
+      SELECT si.*, p.name as product_name
+      FROM sale_items si
+      LEFT JOIN products p ON p.id = si.product_id
+      WHERE si.sale_id = ?
+      ORDER BY si.id ASC
+    ''', [saleId]);
   }
 
   Future<Map<String, dynamic>> getDailySalesSummary(DateTime date) async {

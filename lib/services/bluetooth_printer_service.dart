@@ -266,9 +266,13 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
       bytes += generator.hr(ch: '-');
 
       for (var item in items) {
+        final qtyValue = (item['quantity'] as num?)?.toDouble() ?? 1.0;
+        final qtyText = qtyValue == qtyValue.roundToDouble()
+            ? qtyValue.toStringAsFixed(0)
+            : qtyValue.toStringAsFixed(3).replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
         bytes += generator.row([
           PosColumn(text: item['name'] ?? '', width: 6),
-          PosColumn(text: '${item['quantity'] ?? 1}', width: 2, styles: const PosStyles(align: PosAlign.center)),
+          PosColumn(text: qtyText, width: 2, styles: const PosStyles(align: PosAlign.center)),
           PosColumn(text: '${(item['total_price'] ?? 0.0).toStringAsFixed(2)}', width: 4, styles: const PosStyles(align: PosAlign.right)),
         ]);
       }
@@ -277,7 +281,7 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
       bytes += generator.row([
         PosColumn(text: 'TOTAL', width: 8, styles: const PosStyles(bold: true, height: PosTextSize.size2, width: PosTextSize.size2)),
         PosColumn(
-          text: '${total.toStringAsFixed(2)}',
+          text: total.toStringAsFixed(2),
           width: 4,
           styles: const PosStyles(bold: true, align: PosAlign.right, height: PosTextSize.size2, width: PosTextSize.size2),
         ),
