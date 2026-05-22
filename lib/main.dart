@@ -7,7 +7,13 @@ import 'dart:convert';
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:crypto/crypto.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 import 'services/db_service.dart';
+import 'services/firebase_sync_service.dart';
 import 'services/printer_manager.dart';
 import 'printer_settings.dart';
 import 'package:csv/csv.dart';
@@ -119,6 +125,267 @@ class SetupStatusModel extends ChangeNotifier {
   }
 }
 
+class AuthSessionModel extends ChangeNotifier {
+  static const _loggedInKey = 'auth_logged_in';
+  static const _ownerNameKey = 'auth_owner_name';
+  static const _emailKey = 'auth_email';
+  static const _passwordKey = 'auth_password';
+  static const _companyNameKey = 'auth_company_name';
+  static const _phoneKey = 'auth_phone';
+  static const _userIdKey = 'auth_user_id';
+  static const _companyIdKey = 'auth_company_id';
+  static const _storeIdKey = 'auth_store_id';
+  static const _registerIdKey = 'auth_register_id';
+  static const _roleKey = 'auth_role';
+
+  bool _isAuthenticated = false;
+  String _userId = DatabaseService.defaultUserId;
+  String _companyId = DatabaseService.defaultCompanyId;
+  String _storeId = DatabaseService.defaultStoreId;
+  String _registerId = DatabaseService.defaultRegisterId;
+  String _role = 'owner';
+  String _ownerName = '';
+  String _email = '';
+  String _companyName = '';
+  String _phone = '';
+
+  bool get isAuthenticated => _isAuthenticated;
+  String get userId => _userId;
+  String get companyId => _companyId;
+  String get storeId => _storeId;
+  String get registerId => _registerId;
+  String get role => _role;
+  String get ownerName => _ownerName;
+  String get email => _email;
+  String get companyName => _companyName;
+  String get phone => _phone;
+  bool get canSell => _hasAnyRole(const {'owner', 'admin', 'manager', 'cashier'});
+  bool get canManageInventory => _hasAnyRole(const {'owner', 'admin', 'manager'});
+  bool get canViewReports => _hasAnyRole(const {'owner', 'admin', 'manager'});
+  bool get canManageSettings => _hasAnyRole(const {'owner', 'admin'});
+
+  bool _hasAnyRole(Set<String> roles) => roles.contains(_role);
+
+  String _hashPassword(String password) {
+    return sha256.convert(utf8.encode(password)).toString();
+  }
+
+  String _stableId(String prefix, String seed, [int start = 0]) {
+    final digest = sha256.convert(utf8.encode(seed.trim().toLowerCase())).toString();
+    return '${prefix}_${digest.substring(start, start + 20)}';
+  }
+
+  String _companyIdForUser(String uid, String? savedCompanyId) {
+    if (savedCompanyId == null || savedCompanyId.trim().isEmpty || savedCompanyId == DatabaseService.defaultCompanyId) {
+      return _stableId('cmp', uid);
+    }
+    return savedCompanyId;
+  }
+
+  String _storeIdForCompany(String companyId, String? savedStoreId) {
+    if (savedStoreId == null || savedStoreId.trim().isEmpty || savedStoreId == DatabaseService.defaultStoreId) {
+      return _stableId('store', companyId);
+    }
+    return savedStoreId;
+  }
+
+  String _registerIdForStore(String storeId, String? savedRegisterId) {
+    if (savedRegisterId == null || savedRegisterId.trim().isEmpty || savedRegisterId == DatabaseService.defaultRegisterId) {
+      return '${storeId}_register';
+    }
+    return savedRegisterId;
+  }
+
+  void configureDatabase(DatabaseService db) {
+    db.configureTenant(
+      companyId: _companyId,
+      storeId: _storeId,
+      registerId: _registerId,
+      userId: _userId,
+      role: _role,
+    );
+  }
+
+  Future<void> _loadFirebaseMembership(String uid) async {
+    try {
+      final memberships = await FirebaseFirestore.instance
+          .collection('user_memberships')
+          .doc(uid)
+          .collection('companies')
+          .limit(1)
+          .get();
+      if (memberships.docs.isEmpty) return;
+      final doc = memberships.docs.first;
+      final data = doc.data();
+      _companyId = doc.id;
+      _storeId = (data['store_id'] ?? _stableId('store', _companyId)).toString();
+      _registerId = (data['register_id'] ?? '${_storeId}_register').toString();
+      _role = (data['role'] ?? 'cashier').toString().toLowerCase();
+      _companyName = (data['company_name'] ?? _companyName).toString();
+    } catch (_) {
+      // Keep the locally persisted tenant if the cloud membership mirror is not available yet.
+    }
+  }
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    _isAuthenticated = prefs.getBool(_loggedInKey) ?? false;
+    _ownerName = prefs.getString(_ownerNameKey) ?? '';
+    _email = prefs.getString(_emailKey) ?? '';
+    _companyName = prefs.getString(_companyNameKey) ?? '';
+    _phone = prefs.getString(_phoneKey) ?? '';
+    _userId = prefs.getString(_userIdKey) ??
+        (Firebase.apps.isNotEmpty ? FirebaseAuth.instance.currentUser?.uid : null) ??
+        DatabaseService.defaultUserId;
+    _companyId = _companyIdForUser(_userId, prefs.getString(_companyIdKey));
+    _storeId = _storeIdForCompany(_companyId, prefs.getString(_storeIdKey));
+    _registerId = _registerIdForStore(_storeId, prefs.getString(_registerIdKey));
+    _role = prefs.getString(_roleKey) ?? 'owner';
+    if (Firebase.apps.isNotEmpty && FirebaseAuth.instance.currentUser != null) {
+      await _loadFirebaseMembership(_userId);
+      await prefs.setString(_companyIdKey, _companyId);
+      await prefs.setString(_storeIdKey, _storeId);
+      await prefs.setString(_registerIdKey, _registerId);
+      await prefs.setString(_roleKey, _role);
+      await prefs.setString(_companyNameKey, _companyName);
+    }
+    notifyListeners();
+  }
+
+  Future<String?> login({
+    required String email,
+    required String password,
+  }) async {
+    if (Firebase.apps.isNotEmpty) {
+      try {
+        final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: email.trim().toLowerCase(),
+          password: password,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        _isAuthenticated = true;
+        _userId = credential.user?.uid ?? DatabaseService.defaultUserId;
+        _email = credential.user?.email ?? email.trim().toLowerCase();
+        _ownerName = credential.user?.displayName ?? prefs.getString(_ownerNameKey) ?? '';
+        _companyId = _companyIdForUser(_userId, prefs.getString(_companyIdKey));
+        _storeId = _storeIdForCompany(_companyId, prefs.getString(_storeIdKey));
+        _registerId = _registerIdForStore(_storeId, prefs.getString(_registerIdKey));
+        _role = prefs.getString(_roleKey) ?? 'owner';
+        _companyName = prefs.getString(_companyNameKey) ?? '';
+        _phone = prefs.getString(_phoneKey) ?? '';
+        await _loadFirebaseMembership(_userId);
+        await prefs.setBool(_loggedInKey, true);
+        await prefs.setString(_userIdKey, _userId);
+        await prefs.setString(_companyIdKey, _companyId);
+        await prefs.setString(_storeIdKey, _storeId);
+        await prefs.setString(_registerIdKey, _registerId);
+        await prefs.setString(_roleKey, _role);
+        await prefs.setString(_emailKey, _email);
+        await prefs.setString(_companyNameKey, _companyName);
+        notifyListeners();
+        return null;
+      } on FirebaseAuthException catch (error) {
+        return error.message ?? 'Unable to sign in with Firebase.';
+      }
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final savedEmail = prefs.getString(_emailKey);
+    final savedPassword = prefs.getString(_passwordKey);
+
+    if (savedEmail == null || savedPassword == null) {
+      return 'No company account exists on this device yet.';
+    }
+
+    if (savedEmail.toLowerCase() != email.trim().toLowerCase() || savedPassword != _hashPassword(password)) {
+      return 'Invalid email or password.';
+    }
+
+    _isAuthenticated = true;
+    _userId = prefs.getString(_userIdKey) ?? DatabaseService.defaultUserId;
+    _companyId = _companyIdForUser(_userId, prefs.getString(_companyIdKey));
+    _storeId = _storeIdForCompany(_companyId, prefs.getString(_storeIdKey));
+    _registerId = _registerIdForStore(_storeId, prefs.getString(_registerIdKey));
+    _role = prefs.getString(_roleKey) ?? 'owner';
+    _email = savedEmail;
+    _ownerName = prefs.getString(_ownerNameKey) ?? '';
+    _companyName = prefs.getString(_companyNameKey) ?? '';
+    _phone = prefs.getString(_phoneKey) ?? '';
+    await prefs.setBool(_loggedInKey, true);
+    await prefs.setString(_userIdKey, _userId);
+    notifyListeners();
+    return null;
+  }
+
+  Future<String?> registerCompany({
+    required String companyName,
+    required String ownerName,
+    required String email,
+    required String phone,
+    required String password,
+  }) async {
+    if (companyName.trim().isEmpty || ownerName.trim().isEmpty || email.trim().isEmpty || password.isEmpty) {
+      return 'Please complete all required fields.';
+    }
+    if (!email.contains('@')) {
+      return 'Enter a valid email address.';
+    }
+    if (password.length < 6) {
+      return 'Password must be at least 6 characters.';
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    if (Firebase.apps.isNotEmpty) {
+      try {
+        final credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: email.trim().toLowerCase(),
+          password: password,
+        );
+        await credential.user?.updateDisplayName(ownerName.trim());
+        _userId = credential.user?.uid ?? DatabaseService.defaultUserId;
+      } on FirebaseAuthException catch (error) {
+        return error.message ?? 'Unable to create the Firebase account.';
+      }
+    } else {
+      _userId = _stableId('usr', email);
+    }
+
+    _isAuthenticated = true;
+    _companyId = _stableId('cmp', _userId);
+    _storeId = _stableId('store', _companyId);
+    _registerId = '${_storeId}_register';
+    _role = 'owner';
+    _companyName = companyName.trim();
+    _ownerName = ownerName.trim();
+    _email = email.trim().toLowerCase();
+    _phone = phone.trim();
+
+    await prefs.setBool(_loggedInKey, true);
+    await prefs.setString(_userIdKey, _userId);
+    await prefs.setString(_companyIdKey, _companyId);
+    await prefs.setString(_storeIdKey, _storeId);
+    await prefs.setString(_registerIdKey, _registerId);
+    await prefs.setString(_roleKey, _role);
+    await prefs.setString(_companyNameKey, _companyName);
+    await prefs.setString(_ownerNameKey, _ownerName);
+    await prefs.setString(_emailKey, _email);
+    await prefs.setString(_phoneKey, _phone);
+    await prefs.setString(_passwordKey, _hashPassword(password));
+    notifyListeners();
+    return null;
+  }
+
+  Future<void> logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (Firebase.apps.isNotEmpty) {
+      await FirebaseAuth.instance.signOut();
+    }
+    _isAuthenticated = false;
+    await prefs.setBool(_loggedInKey, false);
+    notifyListeners();
+  }
+}
+
 enum BusinessMode { shop, butchery }
 
 String businessModeLabel(BusinessMode mode) {
@@ -177,7 +444,15 @@ class BusinessModeModel extends ChangeNotifier {
 }
 
 // ================== APP ENTRY ==================
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (_) {
+    // Firebase is optional until the project is configured with FlutterFire.
+  }
   runApp(const ShopaFlowApp());
 }
 
@@ -192,6 +467,7 @@ class ShopaFlowApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => ExchangeRateModel()),
         ChangeNotifierProvider(create: (_) => ThemeModel()),
         ChangeNotifierProvider(create: (_) => SetupStatusModel()),
+        ChangeNotifierProvider(create: (_) => AuthSessionModel()),
         ChangeNotifierProvider(create: (_) => BusinessModeModel()),
         ChangeNotifierProvider(create: (_) => PrinterManager()),
         Provider(create: (_) => DatabaseService()),
@@ -216,7 +492,7 @@ class ShopaFlowApp extends StatelessWidget {
 
 // Reports Tab Widget (standalone)
 Widget buildReportsTab(BuildContext context) {
-  final db = DatabaseService();
+  final db = context.read<DatabaseService>();
   return Padding(
     padding: const EdgeInsets.all(16.0),
     child: SingleChildScrollView(
@@ -339,12 +615,28 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   }
 
   Future<void> _initializeApp() async {
+    final storeInfo = context.read<StoreInfoModel>();
+    final exchangeRate = context.read<ExchangeRateModel>();
+    final themeModel = context.read<ThemeModel>();
+    final setupStatus = context.read<SetupStatusModel>();
+    final authSession = context.read<AuthSessionModel>();
+    final businessMode = context.read<BusinessModeModel>();
+    final db = context.read<DatabaseService>();
+
     // Load all models
-    await context.read<StoreInfoModel>().load();
-    await context.read<ExchangeRateModel>().load();
-    await context.read<ThemeModel>().load();
-    await context.read<SetupStatusModel>().load();
-    await context.read<BusinessModeModel>().load();
+    await storeInfo.load();
+    await exchangeRate.load();
+    await themeModel.load();
+    await setupStatus.load();
+    await authSession.load();
+    authSession.configureDatabase(db);
+    if (authSession.isAuthenticated) {
+      await FirebaseSyncService(databaseService: db).pullCompanyData(
+        companyId: authSession.companyId,
+        storeId: authSession.storeId,
+      );
+    }
+    await businessMode.load();
 
     if (!mounted) {
       return;
@@ -355,8 +647,15 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       if (!mounted) {
         return;
       }
-      final isSetupCompleted = context.read<SetupStatusModel>().isSetupCompleted;
+      final isSetupCompleted = setupStatus.isSetupCompleted;
       final Widget nextScreen = isSetupCompleted ? const MainScreen() : const SetupWizardScreen();
+      if (!authSession.isAuthenticated) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const AuthGateScreen()),
+        );
+        return;
+      }
 
       Navigator.pushReplacement(
         context, 
@@ -364,16 +663,15 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
           builder: (_) => BusinessModeSelectionScreen(nextScreen: nextScreen),
         )
       );
-        @override
-        void dispose() {
-          _navigationTimer?.cancel();
-          _controller.dispose();
-          super.dispose();
-        }
+    });
   }
 
   @override
-  void dispose() { _controller.dispose(); super.dispose(); }
+  void dispose() {
+    _navigationTimer?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -402,6 +700,326 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class AuthGateScreen extends StatefulWidget {
+  const AuthGateScreen({super.key});
+
+  @override
+  State<AuthGateScreen> createState() => _AuthGateScreenState();
+}
+
+class _AuthGateScreenState extends State<AuthGateScreen> {
+  bool _showRegister = true;
+
+  void _goToNextScreen() {
+    final setupStatus = context.read<SetupStatusModel>();
+    final nextScreen = setupStatus.isSetupCompleted ? const MainScreen() : const SetupWizardScreen();
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => BusinessModeSelectionScreen(nextScreen: nextScreen)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Icon(Icons.point_of_sale, size: 64, color: primary),
+                  const SizedBox(height: 14),
+                  Text(
+                    'ShopaFlow',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _showRegister ? 'Create your company workspace' : 'Sign in to your company workspace',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                  const SizedBox(height: 24),
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: true, icon: Icon(Icons.business), label: Text('Register')),
+                      ButtonSegment(value: false, icon: Icon(Icons.login), label: Text('Login')),
+                    ],
+                    selected: {_showRegister},
+                    onSelectionChanged: (selection) => setState(() => _showRegister = selection.first),
+                  ),
+                  const SizedBox(height: 20),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    child: _showRegister
+                        ? RegisterCompanyForm(key: const ValueKey('register'), onSuccess: _goToNextScreen)
+                        : LoginForm(key: const ValueKey('login'), onSuccess: _goToNextScreen),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class LoginForm extends StatefulWidget {
+  final VoidCallback onSuccess;
+  const LoginForm({super.key, required this.onSuccess});
+
+  @override
+  State<LoginForm> createState() => _LoginFormState();
+}
+
+class _LoginFormState extends State<LoginForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _obscurePassword = true;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _emailController.text = context.read<AuthSessionModel>().email;
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+    final error = await context.read<AuthSessionModel>().login(
+      email: _emailController.text,
+      password: _passwordController.text,
+    );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    if (!mounted) return;
+    final auth = context.read<AuthSessionModel>();
+    final db = context.read<DatabaseService>();
+    auth.configureDatabase(db);
+    await FirebaseSyncService(databaseService: db).pullCompanyData(
+      companyId: auth.companyId,
+      storeId: auth.storeId,
+    );
+    if (!mounted) return;
+    widget.onSuccess();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: _formKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextFormField(
+            controller: _emailController,
+            decoration: const InputDecoration(
+              labelText: 'Email',
+              prefixIcon: Icon(Icons.mail_outline),
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: TextInputType.emailAddress,
+            validator: (value) => (value == null || value.trim().isEmpty) ? 'Email is required' : null,
+          ),
+          const SizedBox(height: 14),
+          TextFormField(
+            controller: _passwordController,
+            obscureText: _obscurePassword,
+            decoration: InputDecoration(
+              labelText: 'Password',
+              prefixIcon: const Icon(Icons.lock_outline),
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+                icon: Icon(_obscurePassword ? Icons.visibility : Icons.visibility_off),
+                onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+              ),
+            ),
+            validator: (value) => (value == null || value.isEmpty) ? 'Password is required' : null,
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: _saving ? null : _submit,
+            icon: _saving
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.login),
+            label: Text(_saving ? 'Signing in...' : 'Sign in'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class RegisterCompanyForm extends StatefulWidget {
+  final VoidCallback onSuccess;
+  const RegisterCompanyForm({super.key, required this.onSuccess});
+
+  @override
+  State<RegisterCompanyForm> createState() => _RegisterCompanyFormState();
+}
+
+class _RegisterCompanyFormState extends State<RegisterCompanyForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _companyController = TextEditingController();
+  final _ownerController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _obscurePassword = true;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _companyController.dispose();
+    _ownerController.dispose();
+    _emailController.dispose();
+    _phoneController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+    final error = await context.read<AuthSessionModel>().registerCompany(
+      companyName: _companyController.text,
+      ownerName: _ownerController.text,
+      email: _emailController.text,
+      phone: _phoneController.text,
+      password: _passwordController.text,
+    );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    context.read<AuthSessionModel>().configureDatabase(context.read<DatabaseService>());
+    await context.read<StoreInfoModel>().updateName(_companyController.text);
+    await context.read<DatabaseService>().upsertLocalCompanyProfile(
+      companyId: context.read<AuthSessionModel>().companyId,
+      storeId: context.read<AuthSessionModel>().storeId,
+      companyName: _companyController.text,
+      ownerName: _ownerController.text,
+      email: _emailController.text,
+      userId: context.read<AuthSessionModel>().userId,
+      role: context.read<AuthSessionModel>().role,
+      storeName: _companyController.text,
+    );
+    if (!mounted) return;
+    widget.onSuccess();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: _formKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextFormField(
+            controller: _companyController,
+            decoration: const InputDecoration(
+              labelText: 'Company name',
+              prefixIcon: Icon(Icons.business_outlined),
+              border: OutlineInputBorder(),
+            ),
+            textInputAction: TextInputAction.next,
+            validator: (value) => (value == null || value.trim().isEmpty) ? 'Company name is required' : null,
+          ),
+          const SizedBox(height: 14),
+          TextFormField(
+            controller: _ownerController,
+            decoration: const InputDecoration(
+              labelText: 'Owner name',
+              prefixIcon: Icon(Icons.person_outline),
+              border: OutlineInputBorder(),
+            ),
+            textInputAction: TextInputAction.next,
+            validator: (value) => (value == null || value.trim().isEmpty) ? 'Owner name is required' : null,
+          ),
+          const SizedBox(height: 14),
+          TextFormField(
+            controller: _emailController,
+            decoration: const InputDecoration(
+              labelText: 'Email',
+              prefixIcon: Icon(Icons.mail_outline),
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: TextInputType.emailAddress,
+            textInputAction: TextInputAction.next,
+            validator: (value) {
+              if (value == null || value.trim().isEmpty) return 'Email is required';
+              if (!value.contains('@')) return 'Enter a valid email';
+              return null;
+            },
+          ),
+          const SizedBox(height: 14),
+          TextFormField(
+            controller: _phoneController,
+            decoration: const InputDecoration(
+              labelText: 'Phone (optional)',
+              prefixIcon: Icon(Icons.phone_outlined),
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: TextInputType.phone,
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 14),
+          TextFormField(
+            controller: _passwordController,
+            obscureText: _obscurePassword,
+            decoration: InputDecoration(
+              labelText: 'Password',
+              prefixIcon: const Icon(Icons.lock_outline),
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+                icon: Icon(_obscurePassword ? Icons.visibility : Icons.visibility_off),
+                onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+              ),
+            ),
+            validator: (value) {
+              if (value == null || value.isEmpty) return 'Password is required';
+              if (value.length < 6) return 'Use at least 6 characters';
+              return null;
+            },
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: _saving ? null : _submit,
+            icon: _saving
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.business),
+            label: Text(_saving ? 'Creating workspace...' : 'Create workspace'),
+          ),
+        ],
       ),
     );
   }
@@ -592,12 +1210,31 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
   }
 
   Future<void> _completeSetup() async {
+    final storeInfo = context.read<StoreInfoModel>();
+    final exchangeRate = context.read<ExchangeRateModel>();
+    final themeModel = context.read<ThemeModel>();
+    final setupStatus = context.read<SetupStatusModel>();
+
     // Save all settings
-    await context.read<StoreInfoModel>().updateName(_shopNameController.text);
-    await context.read<StoreInfoModel>().updateAddress(_addressController.text);
-    await context.read<ExchangeRateModel>().update(double.tryParse(_exchangeRateController.text) ?? 320);
-    await context.read<ThemeModel>().updateColor(_selectedColor);
-    await context.read<SetupStatusModel>().markSetupCompleted();
+    await storeInfo.updateName(_shopNameController.text);
+    await storeInfo.updateAddress(_addressController.text);
+    await exchangeRate.update(double.tryParse(_exchangeRateController.text) ?? 320);
+    await themeModel.updateColor(_selectedColor);
+    final auth = context.read<AuthSessionModel>();
+    final db = context.read<DatabaseService>();
+    auth.configureDatabase(db);
+    await db.upsertLocalCompanyProfile(
+      companyId: auth.companyId,
+      storeId: auth.storeId,
+      companyName: auth.companyName.isEmpty ? _shopNameController.text : auth.companyName,
+      ownerName: auth.ownerName,
+      email: auth.email,
+      userId: auth.userId,
+      role: auth.role,
+      storeName: _shopNameController.text,
+      storeAddress: _addressController.text,
+    );
+    await setupStatus.markSetupCompleted();
 
     // Navigate to main screen
     if (mounted) {
@@ -666,7 +1303,7 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
   }
 
   Widget _buildWelcomePage() {
-    return Padding(
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(24.0),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -734,7 +1371,7 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
   }
 
   Widget _buildShopInfoPage() {
-    return Padding(
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -811,7 +1448,7 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
   Widget _buildCustomizationPage() {
     final themeModel = context.read<ThemeModel>();
     
-    return Padding(
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -885,6 +1522,191 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
   }
 }
 
+class SyncStatusButton extends StatefulWidget {
+  const SyncStatusButton({super.key});
+
+  @override
+  State<SyncStatusButton> createState() => _SyncStatusButtonState();
+}
+
+class _SyncStatusButtonState extends State<SyncStatusButton> {
+  late Future<int> _pendingCountFuture;
+  bool _syncing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pendingCountFuture = _loadPendingCount();
+  }
+
+  Future<int> _loadPendingCount() {
+    return context.read<DatabaseService>().getRetryableSyncCount();
+  }
+
+  void _refresh() {
+    setState(() {
+      _pendingCountFuture = _loadPendingCount();
+    });
+  }
+
+  Future<void> _showSyncDetails() async {
+    final db = context.read<DatabaseService>();
+    final pending = await db.getPendingSyncQueue(limit: 20, includeFailed: true);
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                pending.isEmpty ? 'No retryable cloud changes' : '${pending.length} retryable cloud changes',
+                style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                pending.isEmpty
+                    ? 'Everything local is either synced or waiting for a new change.'
+                    : 'These records are stored offline and will be retried on the next sync.',
+              ),
+              if (pending.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 260),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: pending.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, index) {
+                      final item = pending[index];
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                          item['status'] == 'failed' ? Icons.error_outline : Icons.cloud_upload_outlined,
+                          color: item['status'] == 'failed' ? Colors.redAccent : null,
+                        ),
+                        title: Text('${item['operation']} ${item['entity_type']}'),
+                        subtitle: Text(
+                          item['status'] == 'failed'
+                              ? (item['last_error']?.toString() ?? 'Sync failed')
+                              : (item['created_at']?.toString() ?? ''),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              if (pending.isNotEmpty) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _syncNow();
+                    },
+                    icon: const Icon(Icons.sync),
+                    label: const Text('Retry Sync'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () => Navigator.pop(sheetContext),
+                  icon: const Icon(Icons.check),
+                  label: const Text('Done'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    _refresh();
+  }
+
+  Future<void> _syncNow() async {
+    if (_syncing) return;
+    setState(() => _syncing = true);
+
+    final db = context.read<DatabaseService>();
+    try {
+      context.read<AuthSessionModel>().configureDatabase(db);
+      await db.migrateLegacyTenantToActive();
+      final result = await FirebaseSyncService(databaseService: db).syncPendingChanges(retryFailed: true);
+      if (!mounted) return;
+
+      final message = result.configured
+          ? 'Synced ${result.synced} of ${result.attempted} changes${result.failed > 0 ? ', ${result.failed} failed' : ''}.'
+          : result.message ?? 'Firebase is not configured yet.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Sync failed: $error')));
+    } finally {
+      if (mounted) {
+        setState(() => _syncing = false);
+        _refresh();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<int>(
+      future: _pendingCountFuture,
+      builder: (context, snapshot) {
+        final pendingCount = snapshot.data ?? 0;
+        final icon = pendingCount > 0 ? Icons.cloud_upload_outlined : Icons.cloud_done;
+        final label = pendingCount > 0 ? '$pendingCount changes ready to sync' : 'All local changes synced';
+
+        return IconButton(
+          tooltip: label,
+          onPressed: _syncing ? null : _syncNow,
+          onLongPress: _showSyncDetails,
+          icon: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              if (_syncing)
+                const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                )
+              else
+                Icon(icon, color: Colors.white),
+              if (pendingCount > 0)
+                Positioned(
+                  right: -8,
+                  top: -8,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.orangeAccent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      pendingCount > 99 ? '99+' : pendingCount.toString(),
+                      style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 // ================== MAIN SHELL ==================
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -894,85 +1716,140 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _index = 0;
-  late final List<Widget> _pages;
-
-  @override
-  void initState() {
-    super.initState();
-    _pages = const [CheckoutScreen(), ProductsScreen(), ReportsScreen(), SettingsScreen()];
-  }
 
   @override
   Widget build(BuildContext context) {
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
     final store = context.watch<StoreInfoModel>();
     final businessMode = context.watch<BusinessModeModel>();
+    final auth = context.watch<AuthSessionModel>();
+    final navItems = <_ShellNavItem>[
+      const _ShellNavItem('POS', Icons.storefront_rounded, CheckoutScreen()),
+      if (auth.canManageInventory) const _ShellNavItem('Products', Icons.inventory_2_outlined, ProductsScreen()),
+      if (auth.canViewReports) const _ShellNavItem('Reports', Icons.analytics_outlined, ReportsScreen()),
+      if (auth.canManageSettings) const _ShellNavItem('Settings', Icons.settings_outlined, SettingsScreen()),
+    ];
+    final activeIndex = _index >= navItems.length ? 0 : _index;
+    if (activeIndex != _index) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _index = activeIndex);
+      });
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Row(children: [
           Icon(businessMode.isButchery ? Icons.set_meal : Icons.storefront, color: Colors.white),
           const SizedBox(width: 8),
-          Text('${store.name} • ${businessModeLabel(businessMode.mode)}', style: const TextStyle(color: Colors.white)),
-        ]),
-        actions: [
-          Consumer<ExchangeRateModel>(
-            builder: (_, rateModel, __) => Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              margin: const EdgeInsets.only(right: 8),
-              decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(6)),
-              child: Text('1 USD = ${rateModel.rate.toStringAsFixed(2)} ZWL', style: const TextStyle(color: Colors.white, fontSize: 12)),
+          Flexible(
+            child: Text(
+              '${store.name} • ${businessModeLabel(businessMode.mode)}',
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.cloud_done, color: Colors.white),
-            onPressed: () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('All data synced'))),
+        ]),
+        actions: [
+          Consumer<AuthSessionModel>(
+            builder: (_, auth, __) => IconButton(
+              tooltip: auth.ownerName.isEmpty ? 'Account' : auth.ownerName,
+              icon: const Icon(Icons.account_circle, color: Colors.white),
+              onPressed: () => _showAccountMenu(auth),
+            ),
           ),
+          const SyncStatusButton(),
         ],
         backgroundColor: Theme.of(context).colorScheme.primary,
       ),
       body: isLandscape ? Row(children: [
         NavigationRail(
           backgroundColor: Theme.of(context).colorScheme.primary,
-          selectedIndex: _index,
+          selectedIndex: activeIndex,
           onDestinationSelected: (i)=> setState(()=> _index = i),
           selectedIconTheme: const IconThemeData(color: Colors.white),
           unselectedIconTheme: IconThemeData(color: Colors.white.withOpacity(0.6)),
-          destinations: const [
-            NavigationRailDestination(icon: Icon(Icons.storefront_rounded, color: Colors.white), label: Text('POS', style: TextStyle(color: Colors.white))),
-            NavigationRailDestination(icon: Icon(Icons.inventory_2_outlined, color: Colors.white), label: Text('Products', style: TextStyle(color: Colors.white))),
-            NavigationRailDestination(icon: Icon(Icons.analytics_outlined, color: Colors.white), label: Text('Reports', style: TextStyle(color: Colors.white))),
-            NavigationRailDestination(icon: Icon(Icons.settings_outlined, color: Colors.white), label: Text('Settings', style: TextStyle(color: Colors.white))),
-          ]),
-        Expanded(child: _pages[_index])
-      ]) : _pages[_index],
+          destinations: navItems
+              .map((item) => NavigationRailDestination(
+                    icon: Icon(item.icon, color: Colors.white),
+                    label: Text(item.label, style: const TextStyle(color: Colors.white)),
+                  ))
+              .toList()),
+        Expanded(child: navItems[activeIndex].page)
+      ]) : navItems[activeIndex].page,
       bottomNavigationBar: isLandscape ? null : NavigationBar(
         backgroundColor: Theme.of(context).colorScheme.primary,
         indicatorColor: Colors.white.withOpacity(0.15),
-        selectedIndex: _index,
+        selectedIndex: activeIndex,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         onDestinationSelected: (i)=> setState(()=> _index = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.storefront_rounded, color: Colors.white), label: 'POS'),
-          NavigationDestination(icon: Icon(Icons.inventory_2_outlined, color: Colors.white), label: 'Products'),
-          NavigationDestination(icon: Icon(Icons.analytics_outlined, color: Colors.white), label: 'Reports'),
-          NavigationDestination(icon: Icon(Icons.settings_outlined, color: Colors.white), label: 'Settings'),
-        ],
+        destinations: navItems
+            .map((item) => NavigationDestination(icon: Icon(item.icon, color: Colors.white), label: item.label))
+            .toList(),
       ),
     );
   }
+
+  Future<void> _showAccountMenu(AuthSessionModel auth) async {
+    final shouldLogout = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                auth.companyName.isEmpty ? 'Company account' : auth.companyName,
+                style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 4),
+              Text(auth.email.isEmpty ? auth.ownerName : auth.email),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () => Navigator.pop(sheetContext, true),
+                  icon: const Icon(Icons.logout),
+                  label: const Text('Sign out'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (shouldLogout != true || !mounted) return;
+    await context.read<AuthSessionModel>().logout();
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const AuthGateScreen()),
+    );
+  }
+}
+
+class _ShellNavItem {
+  final String label;
+  final IconData icon;
+  final Widget page;
+
+  const _ShellNavItem(this.label, this.icon, this.page);
 }
 
 // ================== CHECKOUT / POS ==================
 class CheckoutScreen extends StatefulWidget { const CheckoutScreen({super.key}); @override State<CheckoutScreen> createState()=> _CheckoutScreenState(); }
 class _CheckoutScreenState extends State<CheckoutScreen> {
   late ValueNotifier<List<Map<String, dynamic>>> _cartNotifier;
-  final TextEditingController _search = TextEditingController();
   String query = '';
+  int _searchReset = 0;
   bool listMode = true; // list default
   bool _loading = true;
   bool _showCart = true; // cart visibility
   List<Map<String, dynamic>> _products = [];
   late DatabaseService db;
+  bool _didScheduleInitialLoad = false;
 
   BusinessModeModel get _businessMode => context.read<BusinessModeModel>();
   bool get _isButchery => _businessMode.isButchery;
@@ -1038,7 +1915,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   void dispose() {
     _cartNotifier.dispose();
-    _search.dispose();
     super.dispose();
   }
 
@@ -1046,14 +1922,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     db = context.read<DatabaseService>();
-    _load();
+    if (_didScheduleInitialLoad) return;
+    _didScheduleInitialLoad = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _load();
+    });
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    if (mounted) setState(() => _loading = true);
     final rows = await db.getAllProducts();
+    if (!mounted) return;
     _products = rows.map((p) => {...p, 'stock': p['stock_quantity']}).toList();
-    if (mounted) setState(() => _loading = false);
+    setState(() => _loading = false);
   }
 
   List<Map<String, dynamic>> get filtered {
@@ -1077,82 +1958,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     double? initialKg,
     String actionLabel = 'Add',
   }) async {
-    final controller = TextEditingController(
-      text: initialKg != null ? formatDecimal(initialKg, decimals: 3) : '',
-    );
-    final value = await showDialog<double>(
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    if (!mounted) return null;
+    return showDialog<double>(
       context: context,
-      builder: (_) => StatefulBuilder(
-        builder: (context, setStateDialog) {
-          String? error;
-
-          void submit() {
-            final parsed = double.tryParse(controller.text.trim());
-            if (parsed == null || parsed <= 0) {
-              setStateDialog(() => error = 'Enter a valid kg amount');
-              return;
-            }
-            if (parsed > maxKg + 0.000001) {
-              setStateDialog(() => error = 'Cannot exceed available stock (${formatDecimal(maxKg, decimals: 3)} kg)');
-              return;
-            }
-            Navigator.pop(context, parsed);
-          }
-
-          return AlertDialog(
-            title: Text('$actionLabel Weight'),
-            content: SizedBox(
-              width: 360,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(productName, style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 8),
-                  Text('Available: ${formatDecimal(maxKg, decimals: 3)} kg'),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: controller,
-                    autofocus: true,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Weight (kg)',
-                      hintText: 'Example: 0.75',
-                      border: OutlineInputBorder(),
-                    ),
-                    onSubmitted: (_) => submit(),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [0.25, 0.5, 0.75, 1.0, 2.0].map((q) {
-                      return ActionChip(
-                        label: Text('${formatDecimal(q, decimals: 2)} kg'),
-                        onPressed: () => controller.text = q.toString(),
-                      );
-                    }).toList(),
-                  ),
-                  if (error != null) ...[
-                    const SizedBox(height: 10),
-                    Text(error!, style: const TextStyle(color: Colors.red)),
-                  ],
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-              ElevatedButton(onPressed: submit, child: Text(actionLabel)),
-            ],
-          );
-        },
+      builder: (_) => ButcheryWeightDialog(
+        productName: productName,
+        maxKg: maxKg,
+        initialKg: initialKg,
+        actionLabel: actionLabel,
       ),
     );
-    controller.dispose();
-    return value;
   }
 
   Future<void> _add(Map<String, dynamic> p) async {
+    if (!context.read<AuthSessionModel>().canSell) {
+      _snack('You do not have permission to sell.');
+      return;
+    }
     final newCart = List<Map<String, dynamic>>.from(_cartNotifier.value);
     final idx = newCart.indexWhere((c) => c['id'] == p['id']);
     final stock = asDouble(p['stock_quantity'] ?? p['stock'] ?? 0);
@@ -1167,9 +1991,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         final entered = await _showKgInputDialog(
           productName: p['name']?.toString() ?? 'Item',
           maxKg: stock,
+          initialKg: stock < _quantityStep ? stock : _quantityStep,
           actionLabel: 'Add',
         );
         if (entered == null) return;
+        if (!mounted) return;
         qtyToAdd = entered;
       }
       newCart.add({'id': p['id'], 'name': p['name'], 'price': p['price'], 'qty': qtyToAdd, 'stock': stock});
@@ -1185,9 +2011,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         final entered = await _showKgInputDialog(
           productName: p['name']?.toString() ?? 'Item',
           maxKg: remaining,
+          initialKg: remaining < _quantityStep ? remaining : _quantityStep,
           actionLabel: 'Add',
         );
         if (entered == null) return;
+        if (!mounted) return;
         qtyIncrement = entered;
       }
       final nextQty = asDouble(newCart[idx]['qty']) + qtyIncrement;
@@ -1215,6 +2043,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       actionLabel: 'Set',
     );
     if (entered == null) return;
+    if (!mounted) return;
     newCart[index] = {...item, 'qty': entered};
     _cartNotifier.value = newCart;
   }
@@ -1250,6 +2079,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _checkout() async {
+    if (!context.read<AuthSessionModel>().canSell) {
+      _snack('You do not have permission to sell.');
+      return;
+    }
     if (_cartNotifier.value.isEmpty) {
       _snack('Cart is empty');
       return;
@@ -1291,7 +2124,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     _cartNotifier.value = [];
     setState(() {
       query = '';
-      _search.clear();
+      _searchReset++;
       _showCart = false;
     });
     _load();
@@ -1346,11 +2179,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       decoration: BoxDecoration(color: Colors.white, border: Border(bottom: BorderSide(color: Colors.grey.shade200))),
       child: Row(children: [
         Expanded(child: TextField(
-          controller: _search,
+          key: ValueKey('checkout-search-$_searchReset'),
           onChanged: (v)=> setState(()=> query = v),
           decoration: InputDecoration(
             prefixIcon: const Icon(Icons.search),
-            suffixIcon: query.isNotEmpty? IconButton(icon: const Icon(Icons.clear), onPressed: (){ _search.clear(); setState(()=> query=''); }): null,
+            suffixIcon: query.isNotEmpty? IconButton(icon: const Icon(Icons.clear), onPressed: (){ setState(() { query=''; _searchReset++; }); }): null,
             hintText: 'Search name / category / barcode',
             filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
           ),
@@ -1758,6 +2591,218 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 }
 
+class ButcheryWeightDialog extends StatefulWidget {
+  final String productName;
+  final double maxKg;
+  final double? initialKg;
+  final String actionLabel;
+
+  const ButcheryWeightDialog({
+    super.key,
+    required this.productName,
+    required this.maxKg,
+    this.initialKg,
+    required this.actionLabel,
+  });
+
+  @override
+  State<ButcheryWeightDialog> createState() => _ButcheryWeightDialogState();
+}
+
+class _ButcheryWeightDialogState extends State<ButcheryWeightDialog> {
+  late String _weightText;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _weightText = widget.initialKg != null ? formatDecimal(widget.initialKg!, decimals: 3) : '';
+  }
+
+  double? _parseKgInput() {
+    return double.tryParse(_weightText.trim().replaceAll(',', '.'));
+  }
+
+  void _appendInput(String token) {
+    setState(() {
+      _error = null;
+      if (token == '.') {
+        if (_weightText.contains('.')) return;
+        _weightText = _weightText.isEmpty ? '0.' : '$_weightText.';
+        return;
+      }
+      if (_weightText == '0') {
+        _weightText = token;
+      } else {
+        _weightText = '$_weightText$token';
+      }
+    });
+  }
+
+  void _backspace() {
+    setState(() {
+      _error = null;
+      if (_weightText.isNotEmpty) {
+        _weightText = _weightText.substring(0, _weightText.length - 1);
+      }
+    });
+  }
+
+  void _clearInput() {
+    setState(() {
+      _weightText = '';
+      _error = null;
+    });
+  }
+
+  void _submit([double? selectedKg]) {
+    if (!mounted) return;
+    if (selectedKg != null) {
+      Navigator.pop(context, selectedKg);
+      return;
+    }
+
+    final parsed = _parseKgInput();
+    if (parsed == null || parsed <= 0) {
+      setState(() => _error = 'Enter a valid kg amount');
+      return;
+    }
+    if (parsed > widget.maxKg + 0.000001) {
+      setState(() => _error = 'Cannot exceed available stock (${formatDecimal(widget.maxKg, decimals: 3)} kg)');
+      return;
+    }
+    Navigator.pop(context, parsed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final displayText = _weightText.trim().isEmpty ? '0' : _weightText.trim();
+    return AlertDialog(
+      title: Text('${widget.actionLabel} Weight'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.productName, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Text('Available: ${formatDecimal(widget.maxKg, decimals: 3)} kg'),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                border: Border.all(color: Theme.of(context).dividerColor),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '$displayText kg',
+                textAlign: TextAlign.right,
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [0.25, 0.5, 0.75, 1.0, 2.0].map((q) {
+                return ActionChip(
+                  label: Text('${formatDecimal(q, decimals: 2)} kg'),
+                  onPressed: q > widget.maxKg + 0.000001 ? null : () => _submit(q),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 12),
+            _WeightKeypad(
+              onDigit: _appendInput,
+              onBackspace: _backspace,
+              onClear: _clearInput,
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 10),
+              Text(_error!, style: const TextStyle(color: Colors.red)),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(onPressed: _submit, child: Text(widget.actionLabel)),
+      ],
+    );
+  }
+}
+
+class _WeightKeypad extends StatelessWidget {
+  final ValueChanged<String> onDigit;
+  final VoidCallback onBackspace;
+  final VoidCallback onClear;
+
+  const _WeightKeypad({
+    required this.onDigit,
+    required this.onBackspace,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _row(['1', '2', '3']),
+        const SizedBox(height: 8),
+        _row(['4', '5', '6']),
+        const SizedBox(height: 8),
+        _row(['7', '8', '9']),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(child: _key('C', onClear)),
+            const SizedBox(width: 8),
+            Expanded(child: _key('0', () => onDigit('0'))),
+            const SizedBox(width: 8),
+            Expanded(child: _key('.', () => onDigit('.'))),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 54,
+              height: 44,
+              child: OutlinedButton(
+                onPressed: onBackspace,
+                child: const Icon(Icons.backspace_outlined, size: 20),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _row(List<String> values) {
+    return Row(
+      children: [
+        for (var i = 0; i < values.length; i++) ...[
+          if (i > 0) const SizedBox(width: 8),
+          Expanded(child: _key(values[i], () => onDigit(values[i]))),
+        ],
+      ],
+    );
+  }
+
+  Widget _key(String label, VoidCallback onPressed) {
+    return SizedBox(
+      height: 44,
+      child: OutlinedButton(
+        onPressed: onPressed,
+        child: Text(label),
+      ),
+    );
+  }
+}
+
 // ================== SETTINGS ==================
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -1827,12 +2872,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _clearAll() async {
+    final db = context.read<DatabaseService>();
     final ok = await showDialog<bool>(context: context, builder: (_)=> AlertDialog(title: const Text('Confirm'), content: const Text('Delete ALL local data? This cannot be undone.'), actions:[TextButton(onPressed: ()=> Navigator.pop(context,false), child: const Text('Cancel')), ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red), onPressed: ()=> Navigator.pop(context,true), child: const Text('Delete'))]));
-    if(ok==true){ await context.read<DatabaseService>().clearAllData(); if(!mounted) return; ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Data cleared'))); }
+    if(ok==true){ await db.clearAllData(); if(!mounted) return; ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Data cleared'))); }
   }
 
   @override
   Widget build(BuildContext context) {
+    if (!context.watch<AuthSessionModel>().canManageSettings) {
+      return const Center(child: Text('You do not have permission to manage settings.'));
+    }
     final businessMode = context.watch<BusinessModeModel>();
     return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children:[
       const Text('Settings', style: TextStyle(fontSize:24, fontWeight: FontWeight.bold)), const SizedBox(height:16),
@@ -2026,6 +3075,7 @@ class _PaymentDialogState extends State<_PaymentDialog> {
   }
 
   void _processPayment() {
+    FocusScope.of(context).unfocus();
     if(method == 'Cash'){
       final paid = double.tryParse(_amount.text) ?? 0;
       if(paid < widget.total){
@@ -2053,48 +3103,51 @@ class _PaymentDialogState extends State<_PaymentDialog> {
           const Text('Select Payment Method'),
         ],
       ),
-      content: SizedBox(
-        width: 400,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: primary.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: primary.withOpacity(0.3)),
-              ),
-              child: Column(
-                children: [
-                  Text('Total: \$${widget.total.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                  if (method == 'Cash' && _amountReceived != null) ...[
-                    const SizedBox(height: 6),
-                    Text('Change: \$${_change.toStringAsFixed(2)}'),
+      content: SingleChildScrollView(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: primary.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: primary.withOpacity(0.3)),
+                ),
+                child: Column(
+                  children: [
+                    Text('Total: \$${widget.total.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    if (method == 'Cash' && _amountReceived != null) ...[
+                      const SizedBox(height: 6),
+                      Text('Change: \$${_change.toStringAsFixed(2)}'),
+                    ],
                   ],
-                ],
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            _buildPaymentMethodCard('Cash', Icons.payments, 'Pay with cash', primary),
-            const SizedBox(height: 8),
-            _buildPaymentMethodCard('Card', Icons.credit_card, 'Pay with card', Theme.of(context).colorScheme.secondary),
-            const SizedBox(height: 8),
-            _buildPaymentMethodCard('Mobile Money', Icons.phone_android, 'Pay with mobile money', Colors.orange),
-            if(method == 'Cash') ...[
               const SizedBox(height: 16),
-              const Text('Amount Received'),
-              const SizedBox(height: 6),
-              TextField(
-                controller: _amount,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                onChanged: (value){ setState((){ _amountReceived = double.tryParse(value) ?? 0.0; }); },
-                decoration: const InputDecoration(prefixText: '\$', hintText: '0.00'),
-              ),
+              _buildPaymentMethodCard('Cash', Icons.payments, 'Pay with cash', primary),
+              const SizedBox(height: 8),
+              _buildPaymentMethodCard('Card', Icons.credit_card, 'Pay with card', Theme.of(context).colorScheme.secondary),
+              const SizedBox(height: 8),
+              _buildPaymentMethodCard('Mobile Money', Icons.phone_android, 'Pay with mobile money', Colors.orange),
+              if(method == 'Cash') ...[
+                const SizedBox(height: 16),
+                const Text('Amount Received'),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _amount,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (value){ setState((){ _amountReceived = double.tryParse(value) ?? 0.0; }); },
+                  decoration: const InputDecoration(prefixText: '\$', hintText: '0.00'),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
       actions: [
@@ -2172,6 +3225,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
   List<Map<String, dynamic>> _products = [];
   List<String> _categories = ['All'];
   late DatabaseService _db;
+  bool _didScheduleInitialLoad = false;
 
   @override
   void initState() {
@@ -2182,7 +3236,11 @@ class _ProductsScreenState extends State<ProductsScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _db = context.read<DatabaseService>();
-    _loadProducts();
+    if (_didScheduleInitialLoad) return;
+    _didScheduleInitialLoad = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadProducts();
+    });
   }
 
   @override
@@ -2192,7 +3250,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
   }
 
   Future<void> _loadProducts() async {
-    setState(() => _loading = true);
+    if (mounted) setState(() => _loading = true);
     try {
       final products = await _db.getAllProducts();
       final categories = <String>{'All'};
@@ -2234,6 +3292,10 @@ class _ProductsScreenState extends State<ProductsScreen> {
   }
 
   Future<void> _addOrEdit([Map<String, dynamic>? product]) async {
+    if (!context.read<AuthSessionModel>().canManageInventory) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You do not have permission to manage inventory.')));
+      return;
+    }
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => AddProductDialog(product: product),
@@ -2270,6 +3332,10 @@ class _ProductsScreenState extends State<ProductsScreen> {
   }
 
   Future<void> _deleteProduct(Map<String, dynamic> product) async {
+    if (!context.read<AuthSessionModel>().canManageInventory) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You do not have permission to delete products.')));
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -2294,6 +3360,10 @@ class _ProductsScreenState extends State<ProductsScreen> {
   }
 
   Future<void> _exportProducts() async {
+    if (!context.read<AuthSessionModel>().canManageInventory) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You do not have permission to export products.')));
+      return;
+    }
     try {
       final products = await _db.getAllProducts();
       if (products.isEmpty) {
@@ -2316,6 +3386,10 @@ class _ProductsScreenState extends State<ProductsScreen> {
   }
 
   Future<void> _importProducts() async {
+    if (!context.read<AuthSessionModel>().canManageInventory) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You do not have permission to import products.')));
+      return;
+    }
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -2487,6 +3561,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
   List<Map<String, dynamic>> _recentSales = [];
   Map<String, dynamic> _inventoryData = {};
   int _todayTransactions = 0;
+  bool _didScheduleInitialLoad = false;
 
   @override
   void initState() {
@@ -2498,7 +3573,11 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _loadReportsData();
+    if (_didScheduleInitialLoad) return;
+    _didScheduleInitialLoad = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadReportsData();
+    });
   }
 
   @override
@@ -2508,7 +3587,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
   }
 
   Future<void> _loadReportsData() async {
-    setState(() => _loading = true);
+    if (mounted) setState(() => _loading = true);
     try {
       final db = context.read<DatabaseService>();
       final sales = await db.getAllSales();
@@ -2648,6 +3727,9 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
+    if (!context.watch<AuthSessionModel>().canViewReports) {
+      return const Center(child: Text('You do not have permission to view reports.'));
+    }
     return Scaffold(
       floatingActionButton: _tabController.index == 2
           ? FloatingActionButton.extended(onPressed: _exportSales, label: const Text('Export Sales'), icon: const Icon(Icons.download))

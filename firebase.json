@@ -1,0 +1,31 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "functions": {
+    "source": "functions"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "shopaflow",
+          "appId": "1:532922145349:android:d53d9f5c9b22309ab8a12c",
+          "fileOutput": "android/app/google-services.json"
+        }
+      }
+    },
+    "dart": {
+      "lib/firebase_options.dart": {
+        "projectId": "shopaflow",
+        "configurations": {
+          "android": "1:532922145349:android:d53d9f5c9b22309ab8a12c",
+          "ios": "1:532922145349:ios:6702ce0b11038115b8a12c",
+          "macos": "1:532922145349:ios:eeea28a6030032acb8a12c",
+          "web": "1:532922145349:web:f5389f70f7371edbb8a12c",
+          "windows": "1:532922145349:web:08590db86d2fac49b8a12c"
+        }
+      }
+    }
+  }
+}
