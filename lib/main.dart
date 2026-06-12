@@ -1,4 +1,5 @@
 import 'package:printing/printing.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'dart:async';
@@ -100,7 +101,7 @@ class ThemeModel extends ChangeNotifier {
   Future<void> updateColor(Color color) async {
     _primaryColor = color;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_colorKey, color.value);
+    await prefs.setInt(_colorKey, color.toARGB32());
     notifyListeners();
   }
 }
@@ -214,14 +215,44 @@ class AuthSessionModel extends ChangeNotifier {
           .collection('companies')
           .limit(1)
           .get();
-      if (memberships.docs.isEmpty) return;
-      final doc = memberships.docs.first;
-      final data = doc.data();
-      _companyId = doc.id;
+      Map<String, dynamic> data;
+      if (memberships.docs.isNotEmpty) {
+        final doc = memberships.docs.first;
+        data = doc.data();
+        _companyId = doc.id;
+      } else {
+        final companyUsers = await FirebaseFirestore.instance
+            .collectionGroup('users')
+            .where('id', isEqualTo: uid)
+            .limit(1)
+            .get();
+        if (companyUsers.docs.isEmpty) return;
+        final doc = companyUsers.docs.first;
+        data = doc.data();
+        _companyId = doc.reference.parent.parent?.id ?? (data['company_id'] ?? _companyId).toString();
+      }
       _storeId = (data['store_id'] ?? _stableId('store', _companyId)).toString();
       _registerId = (data['register_id'] ?? '${_storeId}_register').toString();
       _role = (data['role'] ?? 'cashier').toString().toLowerCase();
       _companyName = (data['company_name'] ?? _companyName).toString();
+      if (_companyName.isEmpty) {
+        final companyDoc = await FirebaseFirestore.instance.collection('companies').doc(_companyId).get();
+        _companyName = (companyDoc.data()?['name'] ?? _companyName).toString();
+      }
+      final userDoc = await FirebaseFirestore.instance
+          .collection('companies')
+          .doc(_companyId)
+          .collection('users')
+          .doc(uid)
+          .get();
+      final userData = userDoc.data();
+      if (userData != null) {
+        _ownerName = (userData['name'] ?? _ownerName).toString();
+        _email = (userData['email'] ?? _email).toString();
+        _role = (userData['role'] ?? _role).toString().toLowerCase();
+        _storeId = (userData['store_id'] ?? _storeId).toString();
+        _registerId = (userData['register_id'] ?? _registerId).toString();
+      }
     } catch (_) {
       // Keep the locally persisted tenant if the cloud membership mirror is not available yet.
     }
@@ -279,10 +310,11 @@ class AuthSessionModel extends ChangeNotifier {
         await prefs.setString(_companyIdKey, _companyId);
         await prefs.setString(_storeIdKey, _storeId);
         await prefs.setString(_registerIdKey, _registerId);
-        await prefs.setString(_roleKey, _role);
-        await prefs.setString(_emailKey, _email);
-        await prefs.setString(_companyNameKey, _companyName);
-        notifyListeners();
+      await prefs.setString(_roleKey, _role);
+      await prefs.setString(_emailKey, _email);
+      await prefs.setString(_ownerNameKey, _ownerName);
+      await prefs.setString(_companyNameKey, _companyName);
+      notifyListeners();
         return null;
       } on FirebaseAuthException catch (error) {
         return error.message ?? 'Unable to sign in with Firebase.';
@@ -630,10 +662,21 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
     await setupStatus.load();
     await authSession.load();
     authSession.configureDatabase(db);
+
+    // Request Bluetooth and Nearby Device permissions at launch for printer persistence
+    if (Platform.isAndroid) {
+      await [
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.location,
+      ].request();
+    }
+
     if (authSession.isAuthenticated) {
       await FirebaseSyncService(databaseService: db).pullCompanyData(
         companyId: authSession.companyId,
         storeId: authSession.storeId,
+        userId: authSession.userId,
       );
     }
     await businessMode.load();
@@ -676,20 +719,14 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF2E7D32), Color(0xFF1B5E20), Color(0xFF0D47A1)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
+        color: const Color(0xFF004D40), // Cleaner, solid background matching the new icon style
         child: Center(
           child: FadeTransition(
             opacity: _fade,
             child: const Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.point_of_sale, color: Colors.white, size: 80),
+                Icon(Icons.shopping_bag_outlined, color: Colors.white, size: 80),
                 SizedBox(height: 16),
                 Text('ShopaFlow', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
                 SizedBox(height: 8),
@@ -821,10 +858,20 @@ class _LoginFormState extends State<LoginForm> {
     final auth = context.read<AuthSessionModel>();
     final db = context.read<DatabaseService>();
     auth.configureDatabase(db);
-    await FirebaseSyncService(databaseService: db).pullCompanyData(
+    final pullResult = await FirebaseSyncService(databaseService: db).pullCompanyData(
       companyId: auth.companyId,
       storeId: auth.storeId,
+      userId: auth.userId,
     );
+    if (pullResult.message != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Cloud pull warning: ${pullResult.message}')));
+    }
+    if (auth.companyName.isNotEmpty) {
+      await context.read<StoreInfoModel>().updateName(auth.companyName);
+    }
+    if (pullResult.configured && pullResult.message == null) {
+      await context.read<SetupStatusModel>().markSetupCompleted();
+    }
     if (!mounted) return;
     widget.onSuccess();
   }
@@ -1124,7 +1171,7 @@ class _BusinessModeSelectionScreenState extends State<BusinessModeSelectionScree
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: selected ? primary : Colors.grey.shade300, width: selected ? 2 : 1),
-          color: selected ? primary.withOpacity(0.08) : Colors.white,
+          color: selected ? primary.withValues(alpha: 0.08) : Colors.white,
         ),
         child: Row(
           children: [
@@ -1327,7 +1374,7 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: _selectedColor.withOpacity(0.1),
+              color: _selectedColor.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Column(
@@ -1424,7 +1471,7 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.blue.withOpacity(0.1),
+              color: Colors.blue.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(8),
             ),
             child: const Row(
@@ -1494,7 +1541,7 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: _selectedColor.withOpacity(0.1),
+              color: _selectedColor.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Column(
@@ -1717,6 +1764,51 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _index = 0;
 
+  Future<bool> _confirmExitWithSync() async {
+    final db = context.read<DatabaseService>();
+    context.read<AuthSessionModel>().configureDatabase(db);
+    await db.migrateLegacyTenantToActive();
+    final pending = await db.getRetryableSyncCount();
+    if (!mounted || pending == 0) return true;
+
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sync before closing?'),
+        content: Text('$pending local change${pending == 1 ? '' : 's'} still need to sync to the cloud. Sync now so records stay aligned?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, 'cancel'), child: const Text('Stay')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, 'exit'), child: const Text('Exit without syncing')),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, 'sync'),
+            icon: const Icon(Icons.sync),
+            label: const Text('Sync now'),
+          ),
+        ],
+      ),
+    );
+
+    if (action == 'exit') return true;
+    if (action != 'sync') return false;
+
+    final result = await FirebaseSyncService(databaseService: db).syncPendingChanges(retryFailed: true);
+    if (!mounted) return false;
+    if (!result.configured || result.failed > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.configured
+                ? 'Sync incomplete: ${result.failed} of ${result.attempted} failed.'
+                : result.message ?? 'Firebase is not configured yet.',
+          ),
+        ),
+      );
+      return false;
+    }
+    return true;
+  }
+
   @override
   Widget build(BuildContext context) {
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
@@ -1736,8 +1828,10 @@ class _MainScreenState extends State<MainScreen> {
       });
     }
 
-    return Scaffold(
-      appBar: AppBar(
+    return WillPopScope(
+      onWillPop: _confirmExitWithSync,
+      child: Scaffold(
+        appBar: AppBar(
         title: Row(children: [
           Icon(businessMode.isButchery ? Icons.set_meal : Icons.storefront, color: Colors.white),
           const SizedBox(width: 8),
@@ -1767,7 +1861,7 @@ class _MainScreenState extends State<MainScreen> {
           selectedIndex: activeIndex,
           onDestinationSelected: (i)=> setState(()=> _index = i),
           selectedIconTheme: const IconThemeData(color: Colors.white),
-          unselectedIconTheme: IconThemeData(color: Colors.white.withOpacity(0.6)),
+          unselectedIconTheme: IconThemeData(color: Colors.white.withValues(alpha: 0.6)),
           destinations: navItems
               .map((item) => NavigationRailDestination(
                     icon: Icon(item.icon, color: Colors.white),
@@ -1776,15 +1870,16 @@ class _MainScreenState extends State<MainScreen> {
               .toList()),
         Expanded(child: navItems[activeIndex].page)
       ]) : navItems[activeIndex].page,
-      bottomNavigationBar: isLandscape ? null : NavigationBar(
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        indicatorColor: Colors.white.withOpacity(0.15),
-        selectedIndex: activeIndex,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        onDestinationSelected: (i)=> setState(()=> _index = i),
-        destinations: navItems
-            .map((item) => NavigationDestination(icon: Icon(item.icon, color: Colors.white), label: item.label))
-            .toList(),
+        bottomNavigationBar: isLandscape ? null : NavigationBar(
+          backgroundColor: Theme.of(context).colorScheme.primary,
+          indicatorColor: Colors.white.withValues(alpha: 0.15),
+          selectedIndex: activeIndex,
+          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          onDestinationSelected: (i)=> setState(()=> _index = i),
+          destinations: navItems
+              .map((item) => NavigationDestination(icon: Icon(item.icon, color: Colors.white), label: item.label))
+              .toList(),
+        ),
       ),
     );
   }
@@ -3030,7 +3125,7 @@ class _AddProductDialogState extends State<AddProductDialog>{
   @override
   Widget build(BuildContext context) {
     final isButchery = context.watch<BusinessModeModel>().isButchery;
-    return AlertDialog(title: Text(widget.product==null? 'Add Product':'Edit Product'), content: ConstrainedBox(constraints: BoxConstraints(maxWidth: 400), child: Form(key: _form, child: SingleChildScrollView(child: Column(children:[
+    return AlertDialog(title: Text(widget.product==null? 'Add Product':'Edit Product'), content: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 400), child: Form(key: _form, child: SingleChildScrollView(child: Column(children:[
       TextFormField(controller: _name, decoration: const InputDecoration(labelText: 'Name'), validator: (v)=> v==null||v.trim().isEmpty? 'Required': null),
       const SizedBox(height:8),
       TextFormField(controller: _desc, decoration: const InputDecoration(labelText: 'Description')),
@@ -3115,9 +3210,9 @@ class _PaymentDialogState extends State<_PaymentDialog> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: primary.withOpacity(0.08),
+                  color: primary.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: primary.withOpacity(0.3)),
+                  border: Border.all(color: primary.withValues(alpha: 0.3)),
                 ),
                 child: Column(
                   children: [
@@ -3178,7 +3273,7 @@ class _PaymentDialogState extends State<_PaymentDialog> {
             color: isSelected ? color : Colors.grey.shade300,
             width: isSelected ? 2 : 1,
           ),
-          color: isSelected ? color.withOpacity(0.08) : Colors.white,
+          color: isSelected ? color.withValues(alpha: 0.08) : Colors.white,
         ),
         child: Row(
           children: [
@@ -3186,7 +3281,7 @@ class _PaymentDialogState extends State<_PaymentDialog> {
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(8),
-                color: color.withOpacity(0.1),
+                color: color.withValues(alpha: 0.1),
               ),
               child: Icon(icon, size: 24, color: color),
             ),
@@ -3910,7 +4005,7 @@ class _ReportsScreenState extends State<ReportsScreen> with TickerProviderStateM
               children: [
                 Container(
                   padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+                  decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
                   child: Icon(icon, color: color),
                 ),
                 const SizedBox(width: 12),

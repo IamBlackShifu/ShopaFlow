@@ -112,6 +112,7 @@ class FirebaseSyncService {
   Future<PullRunResult> pullCompanyData({
     required String companyId,
     required String storeId,
+    String? userId,
   }) async {
     if (Firebase.apps.isEmpty) {
       return const PullRunResult(
@@ -125,6 +126,27 @@ class FirebaseSyncService {
     final companyRef = firestore.collection('companies').doc(companyId);
     var records = 0;
     try {
+      final companySnap = await companyRef.get();
+      final storeSnap = await companyRef.collection('stores').doc(storeId).get();
+      DocumentSnapshot<Map<String, dynamic>>? userSnap;
+      if (userId != null && userId.trim().isNotEmpty) {
+        userSnap = await companyRef.collection('users').doc(userId).get();
+      }
+      if (companySnap.exists && storeSnap.exists && (userSnap == null || userSnap.exists)) {
+        final company = _cleanFirestoreData(companySnap.data() ?? {})..['id'] = companySnap.id;
+        final store = _cleanFirestoreData(storeSnap.data() ?? {})..['id'] = storeSnap.id;
+        final user = _cleanFirestoreData(userSnap?.data() ?? {})
+          ..['id'] = userSnap?.id ?? userId
+          ..['company_id'] = companyId
+          ..['store_id'] = storeId;
+        await _databaseService.upsertRemoteCompanyProfile(
+          company: company,
+          store: store,
+          user: user,
+        );
+        records += 3;
+      }
+
       for (final entry in const {
         'products': 'products',
         'sales': 'sales',

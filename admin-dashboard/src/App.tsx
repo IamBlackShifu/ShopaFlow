@@ -30,6 +30,7 @@ import {
   LogOut,
   Plus,
   RefreshCw,
+  ReceiptText,
   Search,
   ShieldCheck,
   Store,
@@ -39,7 +40,7 @@ import { auth, db, functions } from './firebase';
 import './styles.css';
 
 type Role = 'owner' | 'admin' | 'manager' | 'cashier';
-type Tab = 'overview' | 'stores' | 'inventory' | 'team';
+type Tab = 'overview' | 'sales' | 'stores' | 'inventory' | 'team';
 
 type Membership = {
   companyId: string;
@@ -51,12 +52,41 @@ type Membership = {
 type StoreRow = { id: string; company_id?: string; name?: string; address?: string; created_at?: string };
 type ProductRow = {
   id: string;
+  local_id?: string | number;
+  sync_id?: string;
   company_id?: string;
   name?: string;
   category?: string;
   stock_quantity?: number;
   min_stock_level?: number;
   price?: number;
+  cost?: number;
+  deleted_at?: string | null;
+};
+type SaleRow = {
+  id: string;
+  local_id?: string | number;
+  sync_id?: string;
+  company_id?: string;
+  store_id?: string;
+  total_amount?: number;
+  payment_method?: string;
+  sale_date?: string;
+  receipt_number?: string;
+  deleted_at?: string | null;
+};
+type SaleItemRow = {
+  id: string;
+  sync_id?: string;
+  company_id?: string;
+  store_id?: string;
+  sale_id?: string | number;
+  sale_sync_id?: string;
+  product_id?: string | number;
+  product_sync_id?: string;
+  quantity?: number;
+  unit_price?: number;
+  total_price?: number;
   deleted_at?: string | null;
 };
 type TeamRow = {
@@ -263,6 +293,8 @@ function AdminApp({ user }: { user: User }) {
   const [tab, setTab] = useState<Tab>('overview');
   const [stores, setStores] = useState<StoreRow[]>([]);
   const [products, setProducts] = useState<ProductRow[]>([]);
+  const [sales, setSales] = useState<SaleRow[]>([]);
+  const [saleItems, setSaleItems] = useState<SaleItemRow[]>([]);
   const [team, setTeam] = useState<TeamRow[]>([]);
   const [queryText, setQueryText] = useState('');
   const [loadingData, setLoadingData] = useState(false);
@@ -274,14 +306,24 @@ function AdminApp({ user }: { user: User }) {
     setDataError('');
     try {
       const base = doc(db, 'companies', nextMembership.companyId);
-      const [storeDocs, productDocs, teamDocs] = await Promise.all([
+      const [storeDocs, productDocs, saleDocs, saleItemDocs, teamDocs] = await Promise.all([
         getDocs(collection(base, 'stores')),
         getDocs(collection(base, 'products')),
+        getDocs(collection(base, 'sales')),
+        getDocs(collection(base, 'sale_items')),
         getDocs(collection(base, 'users')),
       ]);
       const onlyCompany = <T extends { company_id?: string }>(row: T) => !row.company_id || row.company_id === nextMembership.companyId;
       setStores(storeDocs.docs.map((item) => ({ ...item.data(), id: item.id } as StoreRow)).filter(onlyCompany).sort((a, b) => (a.name || '').localeCompare(b.name || '')));
-      setProducts(productDocs.docs.map((item) => ({ ...item.data(), id: item.id } as ProductRow)).filter(onlyCompany).filter((item) => !item.deleted_at).sort((a, b) => (a.name || '').localeCompare(b.name || '')));
+      setProducts(productDocs.docs.map((item) => {
+        const data = item.data() as ProductRow;
+        return { ...data, local_id: data.id, id: item.id };
+      }).filter(onlyCompany).filter((item) => !item.deleted_at).sort((a, b) => (a.name || '').localeCompare(b.name || '')));
+      setSales(saleDocs.docs.map((item) => {
+        const data = item.data() as SaleRow;
+        return { ...data, local_id: data.id, id: item.id };
+      }).filter(onlyCompany).filter((item) => !item.deleted_at));
+      setSaleItems(saleItemDocs.docs.map((item) => ({ ...item.data(), id: item.id } as SaleItemRow)).filter(onlyCompany).filter((item) => !item.deleted_at));
       setTeam(teamDocs.docs.map((item) => ({ ...item.data(), id: item.id } as TeamRow)).filter((item) => item.company_id === nextMembership.companyId).sort((a, b) => roleRank[b.role || 'cashier'] - roleRank[a.role || 'cashier'] || (a.name || '').localeCompare(b.name || '')));
     } catch (error) {
       setDataError(error instanceof Error ? error.message : 'Unable to load dashboard data.');
@@ -304,6 +346,7 @@ function AdminApp({ user }: { user: User }) {
 
   const nav = [
     ['overview', BarChart3, 'Overview'],
+    ['sales', ReceiptText, 'Sales'],
     ['stores', Store, 'Stores'],
     ['inventory', Boxes, 'Inventory'],
     ...(canManageCompany(membership.role) ? [['team', Users, 'Team'] as const] : []),
@@ -339,6 +382,7 @@ function AdminApp({ user }: { user: User }) {
         </header>
         {dataError && <div className="banner error"><AlertTriangle size={16} />{dataError}</div>}
         {tab === 'overview' && <Overview stores={stores} products={products} lowStock={lowStock} team={team} inventoryValue={inventoryValue} />}
+        {tab === 'sales' && <SalesPage stores={stores} products={products} sales={sales} saleItems={saleItems} />}
         {tab === 'stores' && <Stores companyId={membership.companyId} stores={stores} canEdit={canManageCompany(membership.role)} onChanged={() => loadWorkspace()} />}
         {tab === 'inventory' && <Inventory products={filteredProducts} canEdit={canManageInventory(membership.role)} queryText={queryText} onQuery={setQueryText} />}
         {tab === 'team' && <Team companyId={membership.companyId} actorRole={membership.role} stores={stores} team={team} canEdit={canManageCompany(membership.role)} onChanged={() => loadWorkspace()} />}
@@ -386,12 +430,190 @@ function Overview({ stores, products, lowStock, team, inventoryValue }: { stores
   );
 }
 
-function Metric({ label, value, detail, tone }: { label: string; value: number; detail: string; tone?: 'warn' | 'ok' }) {
+function Metric({ label, value, detail, tone }: { label: string; value: number | string; detail: string; tone?: 'warn' | 'ok' }) {
   return (
     <div className={`metric ${tone ?? ''}`}>
       <span>{label}</span>
       <strong>{value}</strong>
       <small>{detail}</small>
+    </div>
+  );
+}
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function parseSaleDate(value?: string) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function saleDateKey(value?: string) {
+  if (value && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  return parseSaleDate(value)?.toISOString().slice(0, 10) ?? '';
+}
+
+function money(value: number) {
+  return `$${value.toFixed(2)}`;
+}
+
+function SalesPage({ stores, products, sales, saleItems }: { stores: StoreRow[]; products: ProductRow[]; sales: SaleRow[]; saleItems: SaleItemRow[] }) {
+  const [startDate, setStartDate] = useState(todayIsoDate());
+  const [endDate, setEndDate] = useState(todayIsoDate());
+  const [storeId, setStoreId] = useState('all');
+  const [paymentMethod, setPaymentMethod] = useState('all');
+  const [searchText, setSearchText] = useState('');
+
+  const productLookup = useMemo(() => {
+    const lookup = new Map<string, ProductRow>();
+    for (const product of products) {
+      lookup.set(product.id, product);
+      if (product.sync_id) lookup.set(product.sync_id, product);
+      if (product.local_id !== undefined) lookup.set(String(product.local_id), product);
+    }
+    return lookup;
+  }, [products]);
+
+  const filteredSales = useMemo(() => {
+    return sales
+      .filter((sale) => {
+        const key = saleDateKey(sale.sale_date);
+        if (!key) return false;
+        if (startDate && key < startDate) return false;
+        if (endDate && key > endDate) return false;
+        if (storeId !== 'all' && sale.store_id !== storeId) return false;
+        if (paymentMethod !== 'all' && (sale.payment_method || '').toLowerCase() !== paymentMethod) return false;
+        return true;
+      })
+      .sort((a, b) => (parseSaleDate(b.sale_date)?.getTime() ?? 0) - (parseSaleDate(a.sale_date)?.getTime() ?? 0));
+  }, [sales, startDate, endDate, storeId, paymentMethod]);
+
+  const filteredSaleIds = useMemo(() => new Set(filteredSales.flatMap((sale) => [sale.id, sale.sync_id, sale.local_id?.toString()].filter(Boolean) as string[])), [filteredSales]);
+
+  const soldItems = useMemo(() => {
+    const rows = saleItems
+      .filter((item) => filteredSaleIds.has(String(item.sale_sync_id || item.sale_id || '')))
+      .map((item) => {
+        const product = productLookup.get(String(item.product_sync_id || item.product_id || ''));
+        const quantity = Number(item.quantity ?? 0);
+        const unitPrice = Number(item.unit_price ?? product?.price ?? 0);
+        const cost = Number(product?.cost ?? 0);
+        const revenue = Number(item.total_price ?? unitPrice * quantity);
+        const profit = (unitPrice - cost) * quantity;
+        return {
+          id: item.id,
+          productName: product?.name || String(item.product_id || item.product_sync_id || 'Unknown product'),
+          category: product?.category || 'Uncategorised',
+          quantity,
+          unitPrice,
+          cost,
+          revenue,
+          profit,
+        };
+      })
+      .filter((item) => `${item.productName} ${item.category}`.toLowerCase().includes(searchText.toLowerCase()));
+
+    const grouped = new Map<string, typeof rows[number]>();
+    for (const row of rows) {
+      const current = grouped.get(row.productName) || { ...row, quantity: 0, revenue: 0, profit: 0 };
+      current.quantity += row.quantity;
+      current.revenue += row.revenue;
+      current.profit += row.profit;
+      grouped.set(row.productName, current);
+    }
+    return Array.from(grouped.values()).sort((a, b) => b.revenue - a.revenue);
+  }, [saleItems, filteredSaleIds, productLookup, searchText]);
+
+  const paymentMethods = useMemo(() => {
+    return Array.from(new Set(sales.map((sale) => (sale.payment_method || '').toLowerCase()).filter(Boolean))).sort();
+  }, [sales]);
+
+  const totals = useMemo(() => {
+    const revenue = soldItems.reduce((sum, item) => sum + item.revenue, 0);
+    const profit = soldItems.reduce((sum, item) => sum + item.profit, 0);
+    const quantity = soldItems.reduce((sum, item) => sum + item.quantity, 0);
+    return { revenue, profit, quantity };
+  }, [soldItems]);
+
+  return (
+    <div className="page-stack">
+      <section>
+        <div className="section-head">
+          <div>
+            <h2>Sales</h2>
+            <p>Review what sold during the selected period. Profit is tentative and uses product cost at the time of viewing.</p>
+          </div>
+        </div>
+        <div className="filter-grid">
+          <label>From<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
+          <label>To<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
+          <label>
+            Store
+            <select value={storeId} onChange={(event) => setStoreId(event.target.value)}>
+              <option value="all">All stores</option>
+              {stores.map((store) => <option key={store.id} value={store.id}>{store.name || store.id}</option>)}
+            </select>
+          </label>
+          <label>
+            Payment
+            <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value)}>
+              <option value="all">All methods</option>
+              {paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}
+            </select>
+          </label>
+          <label>Product search<input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Name or category" /></label>
+        </div>
+      </section>
+
+      <section className="metrics-grid">
+        <Metric label="Revenue" value={money(totals.revenue)} detail={`${filteredSales.length} transactions`} />
+        <Metric label="Profit" value={money(totals.profit)} detail="Tentative gross profit" tone={totals.profit >= 0 ? 'ok' : 'warn'} />
+        <Metric label="Quantity sold" value={totals.quantity.toFixed(3).replace(/\.?0+$/, '')} detail="Units or kg sold" />
+        <Metric label="Products sold" value={soldItems.length} detail="Unique products" />
+      </section>
+
+      <section>
+        <div className="section-head">
+          <div>
+            <h2>Items Sold</h2>
+            <p>Grouped by product for the selected filters.</p>
+          </div>
+        </div>
+        <DataTable
+          empty="No sold items found for this filter."
+          columns={['Product', 'Category', 'Qty', 'Revenue', 'Unit cost', 'Profit']}
+          rows={soldItems.map((item) => [
+            item.productName,
+            item.category,
+            item.quantity.toFixed(3).replace(/\.?0+$/, ''),
+            money(item.revenue),
+            money(item.cost),
+            money(item.profit),
+          ])}
+        />
+      </section>
+
+      <section>
+        <div className="section-head">
+          <div>
+            <h2>Transactions</h2>
+            <p>Receipts included in the selected period.</p>
+          </div>
+        </div>
+        <DataTable
+          empty="No transactions found for this filter."
+          columns={['Receipt', 'Date', 'Store', 'Payment', 'Total']}
+          rows={filteredSales.map((sale) => [
+            sale.receipt_number || sale.id,
+            parseSaleDate(sale.sale_date)?.toLocaleString() || '',
+            stores.find((store) => store.id === sale.store_id)?.name || sale.store_id || '',
+            sale.payment_method || '',
+            money(Number(sale.total_amount ?? 0)),
+          ])}
+        />
+      </section>
     </div>
   );
 }

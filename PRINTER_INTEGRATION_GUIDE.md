@@ -30,6 +30,27 @@ ShopaFlow now supports **two types of printers**:
 
 ## How to Use
 
+### Handling Permissions
+For Bluetooth persistence and a smooth user experience, permissions should be requested at application launch rather than at the moment of printing.
+
+**Required Permissions (Android 12+):**
+- `BLUETOOTH_SCAN`
+- `BLUETOOTH_CONNECT`
+- `ACCESS_FINE_LOCATION` (Required for scanning on some versions)
+
+**Implementation Example:**
+```dart
+import 'package:permission_handler/permission_handler.dart';
+
+Future<void> requestPrinterPermissions() async {
+  await [
+    Permission.bluetoothScan,
+    Permission.bluetoothConnect,
+    Permission.location,
+  ].request();
+}
+```
+
 ### For Users
 
 #### Setting Up Bluetooth Printer

@@ -1,12 +1,12 @@
 #!/bin/sh
 # This is a generated file; do not edit or check into version control.
-export "FLUTTER_ROOT=C:\Dev\flutter"
-export "FLUTTER_APPLICATION_PATH=C:\Users\DELL\OneDrive - University of East London\Documents\Experiments\ShopaFlow"
+export "FLUTTER_ROOT=D:\Dev\flutter"
+export "FLUTTER_APPLICATION_PATH=D:\DELL\Documents\Experiments\ShopaFlow"
+export "FLUTTER_FRAMEWORK_SWIFT_PACKAGE_PATH=D:\DELL\Documents\Experiments\ShopaFlow\macos\Flutter\ephemeral\Packages\.packages\FlutterFramework"
 export "COCOAPODS_PARALLEL_CODE_SIGN=true"
 export "FLUTTER_BUILD_DIR=build"
 export "FLUTTER_BUILD_NAME=1.0.0"
 export "FLUTTER_BUILD_NUMBER=1"
-export "FLUTTER_CLI_BUILD_MODE=debug"
 export "DART_OBFUSCATION=false"
 export "TRACK_WIDGET_CREATION=true"
 export "TREE_SHAKE_ICONS=false"

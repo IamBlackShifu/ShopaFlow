@@ -1,8 +1,6 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
-import 'package:image/image.dart' as img;
 import 'printer_service_interface.dart';
 
 class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceInterface {

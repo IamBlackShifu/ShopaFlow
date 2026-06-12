@@ -40,8 +40,8 @@ pos, point of sale, retail, shop, business, inventory, sales, receipt, barcode, 
 - Design tip: Include app name, tagline, and main visual
 
 ### App Icon (Handled by Flutter)
-- [x] **512x512 PNG** (auto-generated from 1024x1024)
-- Already configured via flutter_launcher_icons
+- [ ] **Minimalist Icon**: White line-art shopping bag on transparent background.
+- [ ] **Theme Color**: Deep Emerald (#004D40) for consistent branding.
 
 ### Promotional Assets (Optional but Recommended)
 - [ ] **Promo graphic**: 180w x 120h

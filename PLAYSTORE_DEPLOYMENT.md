@@ -280,4 +280,5 @@ For issues during deployment:
 - Version: 1.0.0 (Build 1)
 - Min SDK: 21 (Android 5.0)
 - Target SDK: 34 (Android 14)
+- Target SDK: 35 (Android 15)
 - Signing: Release keystore required

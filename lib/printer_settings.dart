@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'services/printer_manager.dart';
 import 'services/printer_service_interface.dart';
-import 'services/bluetooth_printer_service.dart';
 import 'main.dart'; // For StoreInfoModel
 
 

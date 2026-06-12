@@ -15,7 +15,7 @@ dependencies:
 
   # UI and Navigation
   cupertino_icons: ^1.0.6
-  material_color_utilities: ^0.11.1
+  material_color_utilities: 0.13.0
 
   # State Management
   provider: ^6.1.1
@@ -35,6 +35,7 @@ dependencies:
   shared_preferences: ^2.2.2
   intl: ^0.18.1
   uuid: ^4.1.0
+  permission_handler: ^11.3.1
 
   # Printing
   printing: ^5.11.1
@@ -75,9 +76,9 @@ dev_dependencies:
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: "assets/icon/icon.png"
-  adaptive_icon_background: "#FFFFFF"
-  adaptive_icon_foreground: "assets/icon/icon.png"
+  image_path: "assets/icons/icon.png"
+  adaptive_icon_background: "#00000000"
+  adaptive_icon_foreground: "assets/icons/icon.png"
 
 flutter:
   uses-material-design: true

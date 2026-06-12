@@ -553,6 +553,62 @@ class DatabaseService {
     });
   }
 
+  Future<void> upsertRemoteCompanyProfile({
+    required Map<String, dynamic> company,
+    required Map<String, dynamic> store,
+    required Map<String, dynamic> user,
+  }) async {
+    final db = await database;
+    final companyId = (company['id'] ?? _companyId).toString();
+    final storeId = (store['id'] ?? user['store_id'] ?? _storeId).toString();
+    final userId = (user['id'] ?? _userId).toString();
+    final registerId = (user['register_id'] ?? '${storeId}_register').toString();
+    final role = (user['role'] ?? _role).toString().toLowerCase();
+    final now = DateTime.now().toIso8601String();
+
+    _companyId = companyId;
+    _storeId = storeId;
+    _registerId = registerId;
+    _userId = userId;
+    _role = role;
+
+    await db.transaction((txn) async {
+      await txn.insert('companies', {
+        'id': companyId,
+        'name': (company['name'] ?? 'Company').toString(),
+        'owner_user_id': company['owner_user_id']?.toString(),
+        'plan': (company['plan'] ?? 'local').toString(),
+        'subscription_status': (company['subscription_status'] ?? 'local').toString(),
+        'created_at': (company['created_at'] ?? now).toString(),
+        'updated_at': (company['updated_at'] ?? now).toString(),
+        'sync_status': _synced,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+      await txn.insert('stores', {
+        'id': storeId,
+        'company_id': companyId,
+        'name': (store['name'] ?? company['name'] ?? 'Main Store').toString(),
+        'address': store['address']?.toString(),
+        'created_at': (store['created_at'] ?? now).toString(),
+        'updated_at': (store['updated_at'] ?? now).toString(),
+        'sync_status': _synced,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+      await txn.insert('app_users', {
+        'id': userId,
+        'company_id': companyId,
+        'store_id': storeId,
+        'register_id': registerId,
+        'name': (user['name'] ?? user['email'] ?? 'User').toString(),
+        'email': user['email']?.toString(),
+        'role': role,
+        'created_at': (user['created_at'] ?? now).toString(),
+        'updated_at': (user['updated_at'] ?? now).toString(),
+        'sync_status': _synced,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    });
+  }
+
   Future<void> _migrateLegacyTenantRows(
     DatabaseExecutor db, {
     required String companyId,
