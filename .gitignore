@@ -101,6 +101,7 @@ lib/generated_plugin_registrant.dart
 **/ios/Runner/GoogleService-Info.plist
 **/android/app/google-services.json
 .firebase/
+.build-cache/
 firebase-debug.log
 
 # Environment files
@@ -111,6 +112,8 @@ firebase-debug.log
 
 # Backend/Node.js related (for your backend folder)
 backend/node_modules/
+admin-dashboard/node_modules/
+admin-dashboard/dist/
 backend/.env
 backend/dist/
 backend/logs/
@@ -163,6 +166,10 @@ credentials.json
 service-account-key.json
 keystore.properties
 key.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
 
 # Platform specific
 Thumbs.db

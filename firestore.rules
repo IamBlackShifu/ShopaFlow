@@ -2,124 +2,243 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() {
-      return request.auth != null;
+    function signedIn() { return request.auth != null; }
+    function companyPath(companyId) { return /databases/$(database)/documents/companies/$(companyId); }
+    function companyUserPath(companyId, userId) { return /databases/$(database)/documents/companies/$(companyId)/users/$(userId); }
+    function membershipPath(userId, companyId) { return /databases/$(database)/documents/user_memberships/$(userId)/companies/$(companyId); }
+    function storePath(companyId, storeId) { return /databases/$(database)/documents/companies/$(companyId)/stores/$(storeId); }
+    function platformAdminPath(userId) { return /databases/$(database)/documents/platform_admins/$(userId); }
+    function isBootstrapSuperAdmin() {
+      return signedIn() && request.auth.uid == 'RAKsm1i4I3TLQA17nJulIZOx8ip2';
+    }
+    function isSuperAdmin() {
+      return signedIn()
+        && (isBootstrapSuperAdmin() || exists(platformAdminPath(request.auth.uid)));
+    }
+    function companyIsActive(companyId) {
+      return get(companyPath(companyId)).data.subscription_status == 'active'
+        && get(companyPath(companyId)).data.operating_status == 'active';
     }
 
     function isCompanyUser(companyId) {
-      return signedIn()
-        && exists(/databases/$(database)/documents/companies/$(companyId)/users/$(request.auth.uid));
+      return signedIn() && exists(companyUserPath(companyId, request.auth.uid));
     }
-
-    function userRole(companyId) {
-      return get(/databases/$(database)/documents/companies/$(companyId)/users/$(request.auth.uid)).data.role;
-    }
-
+    function userRole(companyId) { return get(companyUserPath(companyId, request.auth.uid)).data.role; }
     function isCompanyOwner(companyId) {
-      return signedIn()
-        && get(/databases/$(database)/documents/companies/$(companyId)).data.owner_user_id == request.auth.uid;
+      return signedIn() && get(companyPath(companyId)).data.owner_user_id == request.auth.uid;
     }
-
+    function willBeCompanyOwner(companyId) {
+      return signedIn() && getAfter(companyPath(companyId)).data.owner_user_id == request.auth.uid;
+    }
     function hasRole(companyId, roles) {
       return (isCompanyUser(companyId) && userRole(companyId) in roles)
         || (isCompanyOwner(companyId) && 'owner' in roles);
     }
-
-    function isOwnerOrAdmin(companyId) {
-      return hasRole(companyId, ['owner', 'admin']);
-    }
-
-    function isAdmin(companyId) {
-      return isCompanyUser(companyId) && userRole(companyId) == 'admin';
-    }
-
+    function isOwnerOrAdmin(companyId) { return hasRole(companyId, ['owner', 'admin']); }
+    function isAdmin(companyId) { return isCompanyUser(companyId) && userRole(companyId) == 'admin'; }
     function canManageInventory(companyId) {
-      return hasRole(companyId, ['owner', 'admin', 'manager']);
+      return companyIsActive(companyId) && hasRole(companyId, ['owner', 'admin', 'manager']);
     }
-
     function canSell(companyId) {
-      return hasRole(companyId, ['owner', 'admin', 'manager', 'cashier']);
+      return companyIsActive(companyId) && hasRole(companyId, ['owner', 'admin', 'manager', 'cashier']);
+    }
+    function validRole(role) { return role in ['owner', 'admin', 'manager', 'cashier']; }
+    function actorCanAssign(companyId, role) {
+      return companyIsActive(companyId)
+        && ((isCompanyOwner(companyId) && role in ['admin', 'manager', 'cashier'])
+        || (isAdmin(companyId) && role in ['manager', 'cashier']));
+    }
+    function validCompanyUser(companyId, userId, data) {
+      return data.id == userId
+        && data.company_id == companyId
+        && data.store_id is string
+        && data.register_id is string
+        && data.role is string
+        && validRole(data.role)
+        && getAfter(storePath(companyId, data.store_id)).data.company_id == companyId;
+    }
+    function validMembership(companyId, userId, data) {
+      return data.company_id == companyId
+        && data.user_id == userId
+        && data.store_id is string
+        && data.register_id is string
+        && data.role is string
+        && validRole(data.role)
+        && getAfter(storePath(companyId, data.store_id)).data.company_id == companyId;
+    }
+    function userAndMembershipAgree(companyId, userId) {
+      let member = getAfter(companyUserPath(companyId, userId)).data;
+      let membership = getAfter(membershipPath(userId, companyId)).data;
+      return member.company_id == membership.company_id
+        && member.id == membership.user_id
+        && member.store_id == membership.store_id
+        && member.register_id == membership.register_id
+        && member.role == membership.role;
+    }
+    function validScopedCreate(companyId) { return request.resource.data.company_id == companyId; }
+
+    match /platform_admins/{adminId} {
+      allow read: if signedIn() && (adminId == request.auth.uid || isSuperAdmin());
+      allow create, update: if isBootstrapSuperAdmin()
+        && request.resource.data.uid == adminId
+        && request.resource.data.role == 'super_admin';
+      allow delete: if isBootstrapSuperAdmin() && adminId != request.auth.uid;
     }
 
     match /companies/{companyId} {
       allow create: if signedIn()
         && request.resource.data.id == companyId
-        && request.resource.data.owner_user_id == request.auth.uid;
-      allow read: if isCompanyUser(companyId) || isCompanyOwner(companyId);
-      allow update: if isOwnerOrAdmin(companyId);
+        && request.resource.data.owner_user_id == request.auth.uid
+        && request.resource.data.subscription_status == 'pending'
+        && request.resource.data.operating_status == 'paused';
+      allow read: if isSuperAdmin() || isCompanyUser(companyId) || isCompanyOwner(companyId);
+      allow update: if (isSuperAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'subscription_status',
+            'operating_status',
+            'subscription_updated_at',
+            'subscription_updated_by',
+            'suspension_reason',
+            'subscription_started_at',
+            'billing_cycle_days',
+            'last_payment_at',
+            'next_payment_due_at',
+            'last_payment_amount',
+            'billing_currency',
+            'payment_reference',
+            'payment_count'
+          ]))
+        || (isOwnerOrAdmin(companyId)
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.owner_user_id == resource.data.owner_user_id
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'subscription_status',
+            'operating_status',
+            'subscription_updated_at',
+            'subscription_updated_by',
+            'suspension_reason',
+            'subscription_started_at',
+            'billing_cycle_days',
+            'last_payment_at',
+            'next_payment_due_at',
+            'last_payment_amount',
+            'billing_currency',
+            'payment_reference',
+            'payment_count'
+          ]));
       allow delete: if false;
 
       match /users/{userId} {
-        allow read: if isCompanyUser(companyId);
+        allow read: if signedIn() && (userId == request.auth.uid || canManageInventory(companyId));
         allow create: if signedIn()
-          && (
-            (userId == request.auth.uid
-              && request.resource.data.company_id == companyId
+          && validCompanyUser(companyId, userId, request.resource.data)
+          && userAndMembershipAgree(companyId, userId)
+          && ((userId == request.auth.uid
               && request.resource.data.role == 'owner'
-              && get(/databases/$(database)/documents/companies/$(companyId)).data.owner_user_id == request.auth.uid)
-            || (isCompanyOwner(companyId)
-              && request.resource.data.company_id == companyId
-              && request.resource.data.role in ['admin', 'manager', 'cashier'])
-            || (isAdmin(companyId)
-              && request.resource.data.company_id == companyId
-              && request.resource.data.role in ['manager', 'cashier'])
-          );
+              && willBeCompanyOwner(companyId))
+            || actorCanAssign(companyId, request.resource.data.role));
         allow update: if signedIn()
-          && request.resource.data.company_id == companyId
-          && (
-            (userId == request.auth.uid
+          && validCompanyUser(companyId, userId, request.resource.data)
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.company_id == resource.data.company_id
+          && userAndMembershipAgree(companyId, userId)
+          && ((userId == request.auth.uid
               && resource.data.role == 'owner'
               && request.resource.data.role == 'owner'
               && isCompanyOwner(companyId))
-            || (isCompanyOwner(companyId)
-              && resource.data.role != 'owner'
-              && request.resource.data.role in ['admin', 'manager', 'cashier'])
-            || (isAdmin(companyId)
-              && resource.data.role in ['manager', 'cashier']
-              && request.resource.data.role in ['manager', 'cashier'])
-          );
-        allow delete: if hasRole(companyId, ['owner']);
+            || (resource.data.role != 'owner'
+              && actorCanAssign(companyId, request.resource.data.role)));
+        allow delete: if signedIn()
+          && resource.data.role != 'owner'
+          && (isCompanyOwner(companyId)
+            || (isAdmin(companyId) && resource.data.role in ['manager', 'cashier']));
       }
 
       match /stores/{storeId} {
-        allow read: if isCompanyUser(companyId);
-        allow create, update: if isOwnerOrAdmin(companyId);
-        allow delete: if hasRole(companyId, ['owner']);
+        allow read: if isCompanyUser(companyId) || isCompanyOwner(companyId);
+        allow create: if validScopedCreate(companyId)
+          && (isOwnerOrAdmin(companyId) || willBeCompanyOwner(companyId));
+        allow update: if companyIsActive(companyId) && isOwnerOrAdmin(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if companyIsActive(companyId) && hasRole(companyId, ['owner']);
       }
-
       match /registers/{registerId} {
         allow read: if isCompanyUser(companyId);
-        allow create, update: if isOwnerOrAdmin(companyId);
-        allow delete: if hasRole(companyId, ['owner']);
+        allow create: if validScopedCreate(companyId) && companyIsActive(companyId) && isOwnerOrAdmin(companyId);
+        allow update: if companyIsActive(companyId) && isOwnerOrAdmin(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if companyIsActive(companyId) && hasRole(companyId, ['owner']);
       }
-
       match /products/{productId} {
         allow read: if isCompanyUser(companyId);
-        allow create, update, delete: if canManageInventory(companyId);
-      }
-
-      match /customers/{customerId} {
-        allow read: if isCompanyUser(companyId);
-        allow create, update: if canSell(companyId);
+        allow create: if canManageInventory(companyId) && validScopedCreate(companyId);
+        allow update: if canManageInventory(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
         allow delete: if canManageInventory(companyId);
       }
-
+      match /categories/{categoryId} {
+        allow read: if isCompanyUser(companyId) || isCompanyOwner(companyId);
+        allow create: if canManageInventory(companyId) && validScopedCreate(companyId);
+        allow update: if canManageInventory(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if companyIsActive(companyId) && isOwnerOrAdmin(companyId);
+      }
+      match /customers/{customerId} {
+        allow read: if isCompanyUser(companyId);
+        allow create: if canSell(companyId) && validScopedCreate(companyId);
+        allow update: if canSell(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if canManageInventory(companyId);
+      }
+      match /documents/{documentId} {
+        allow read: if isCompanyUser(companyId) || isCompanyOwner(companyId);
+        allow create: if canManageInventory(companyId)
+          && validScopedCreate(companyId)
+          && request.resource.data.kind in ['invoice', 'quotation'];
+        allow update: if canManageInventory(companyId)
+          && request.resource.data.company_id == resource.data.company_id
+          && request.resource.data.kind in ['invoice', 'quotation'];
+        allow delete: if companyIsActive(companyId) && isOwnerOrAdmin(companyId);
+        match /events/{eventId} {
+          allow read: if isCompanyUser(companyId) || isCompanyOwner(companyId);
+          allow create: if canManageInventory(companyId) && validScopedCreate(companyId);
+          allow update, delete: if false;
+        }
+      }
+      match /settings/{settingsId} {
+        allow read: if isCompanyUser(companyId) || isCompanyOwner(companyId);
+        allow create: if companyIsActive(companyId) && isOwnerOrAdmin(companyId) && validScopedCreate(companyId);
+        allow update: if companyIsActive(companyId) && isOwnerOrAdmin(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if false;
+      }
+      match /counters/{counterId} {
+        allow read: if canManageInventory(companyId);
+        allow create: if canManageInventory(companyId) && validScopedCreate(companyId);
+        allow update: if canManageInventory(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if false;
+      }
       match /sales/{saleId} {
         allow read: if isCompanyUser(companyId);
-        allow create: if canSell(companyId);
-        allow update, delete: if isOwnerOrAdmin(companyId);
+        allow create: if canSell(companyId) && validScopedCreate(companyId);
+        allow update: if companyIsActive(companyId) && isOwnerOrAdmin(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if companyIsActive(companyId) && isOwnerOrAdmin(companyId);
       }
-
       match /sale_items/{itemId} {
         allow read: if isCompanyUser(companyId);
-        allow create: if canSell(companyId);
-        allow update, delete: if isOwnerOrAdmin(companyId);
+        allow create: if canSell(companyId) && validScopedCreate(companyId);
+        allow update: if companyIsActive(companyId) && isOwnerOrAdmin(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if companyIsActive(companyId) && isOwnerOrAdmin(companyId);
       }
-
       match /inventory_movements/{movementId} {
         allow read: if isCompanyUser(companyId);
-        allow create: if canSell(companyId);
-        allow update, delete: if isOwnerOrAdmin(companyId);
+        allow create: if canSell(companyId) && validScopedCreate(companyId);
+        allow update: if companyIsActive(companyId) && isOwnerOrAdmin(companyId)
+          && request.resource.data.company_id == resource.data.company_id;
+        allow delete: if companyIsActive(companyId) && isOwnerOrAdmin(companyId);
       }
     }
 
@@ -130,28 +249,30 @@ service cloud.firestore {
     match /user_memberships/{userId}/companies/{companyId} {
       allow read: if signedIn() && userId == request.auth.uid;
       allow create: if signedIn()
-        && (
-          (userId == request.auth.uid
-            && get(/databases/$(database)/documents/companies/$(companyId)).data.owner_user_id == request.auth.uid
-            && request.resource.data.role == 'owner')
-          || (isCompanyOwner(companyId) && request.resource.data.role in ['admin', 'manager', 'cashier'])
-          || (isAdmin(companyId) && request.resource.data.role in ['manager', 'cashier'])
-        );
+        && validMembership(companyId, userId, request.resource.data)
+        && userAndMembershipAgree(companyId, userId)
+        && ((userId == request.auth.uid
+            && request.resource.data.role == 'owner'
+            && willBeCompanyOwner(companyId))
+          || (userId == request.auth.uid
+            && exists(companyUserPath(companyId, userId))
+            && get(companyUserPath(companyId, userId)).data.role == request.resource.data.role)
+          || actorCanAssign(companyId, request.resource.data.role));
       allow update: if signedIn()
-        && request.resource.data.company_id == companyId
-        && (
-          (userId == request.auth.uid
+        && validMembership(companyId, userId, request.resource.data)
+        && request.resource.data.company_id == resource.data.company_id
+        && request.resource.data.user_id == resource.data.user_id
+        && userAndMembershipAgree(companyId, userId)
+        && ((userId == request.auth.uid
             && resource.data.role == 'owner'
             && request.resource.data.role == 'owner'
             && isCompanyOwner(companyId))
-          || (isCompanyOwner(companyId)
-            && resource.data.role != 'owner'
-            && request.resource.data.role in ['admin', 'manager', 'cashier'])
-          || (isAdmin(companyId)
-            && resource.data.role in ['manager', 'cashier']
-            && request.resource.data.role in ['manager', 'cashier'])
-        );
-      allow delete: if signedIn() && isOwnerOrAdmin(companyId);
+          || (resource.data.role != 'owner'
+            && actorCanAssign(companyId, request.resource.data.role)));
+      allow delete: if signedIn()
+        && resource.data.role != 'owner'
+        && (isCompanyOwner(companyId)
+          || (isAdmin(companyId) && resource.data.role in ['manager', 'cashier']));
     }
   }
 }

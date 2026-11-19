@@ -37,16 +37,16 @@ keytool -genkey -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysiz
 ```
 
 When prompted:
-- Password: `shopaflow123` (or your own secure password)
+- Password: Use a unique strong password stored in your password manager or CI secret store.
 - Name: Your name
 - Organization: Your company name
 - City, State, Country: Your location
 
 **IMPORTANT**: Keep this keystore file secure! You'll need it for all future updates.
 
-### Configure Environment Variables (Optional but Recommended)
+### Configure Environment Variables (Required For Release Builds)
 
-For better security, set environment variables:
+Release builds fail unless these environment variables are set:
 
 **Windows:**
 ```powershell

@@ -4,9 +4,31 @@ import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
+class InsufficientStockException implements Exception {
+  InsufficientStockException({
+    required this.productId,
+    required this.available,
+    required this.requested,
+    this.productName,
+  });
+
+  final Object? productId;
+  final double available;
+  final double requested;
+  final String? productName;
+
+  @override
+  String toString() {
+    final name = productName == null || productName!.trim().isEmpty
+        ? 'Product $productId'
+        : productName!;
+    return '$name only has $available in stock. Requested $requested.';
+  }
+}
+
 class DatabaseService {
   static Database? _database;
-  static const int _dbVersion = 3;
+  static const int _dbVersion = 4;
   static const String defaultCompanyId = 'local-company';
   static const String defaultStoreId = 'local-store';
   static const String defaultRegisterId = 'local-register';
@@ -36,7 +58,9 @@ class DatabaseService {
   }) {
     _companyId = companyId.trim().isEmpty ? defaultCompanyId : companyId.trim();
     _storeId = storeId.trim().isEmpty ? defaultStoreId : storeId.trim();
-    _registerId = (registerId == null || registerId.trim().isEmpty) ? '${_storeId}_register' : registerId.trim();
+    _registerId = (registerId == null || registerId.trim().isEmpty)
+        ? '${_storeId}_register'
+        : registerId.trim();
     _userId = userId.trim().isEmpty ? defaultUserId : userId.trim();
     _role = role.trim().isEmpty ? 'cashier' : role.trim().toLowerCase();
   }
@@ -210,6 +234,9 @@ class DatabaseService {
         await _createIndexes(txn);
       });
     }
+    if (oldVersion < 4) {
+      await _createSaasTables(db);
+    }
   }
 
   Future<void> _onOpen(Database db) async {
@@ -223,12 +250,28 @@ class DatabaseService {
 
   Future<void> _createSaasTables(DatabaseExecutor db) async {
     await db.execute('''
+      CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sync_id TEXT UNIQUE NOT NULL,
+        company_id TEXT NOT NULL DEFAULT '$defaultCompanyId',
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        created_at TEXT,
+        updated_at TEXT,
+        created_by TEXT DEFAULT '$defaultUserId',
+        sync_status TEXT NOT NULL DEFAULT '$_pendingSync',
+        deleted_at TEXT,
+        version INTEGER NOT NULL DEFAULT 1
+      )
+    ''');
+
+    await db.execute('''
       CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         owner_user_id TEXT,
-        plan TEXT NOT NULL DEFAULT 'local',
-        subscription_status TEXT NOT NULL DEFAULT 'local',
+        plan TEXT NOT NULL DEFAULT 'starter',
+        subscription_status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT,
         updated_at TEXT,
         sync_status TEXT NOT NULL DEFAULT '$_pendingSync'
@@ -317,53 +360,82 @@ class DatabaseService {
   }
 
   Future<void> _createIndexes(DatabaseExecutor db) async {
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_products_scope ON products(company_id, store_id, deleted_at)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_sales_scope_date ON sales(company_id, store_id, sale_date)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_customers_scope ON customers(company_id, store_id, deleted_at)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_inventory_product ON inventory_movements(product_id, created_at)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status, created_at)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_products_scope ON products(company_id, store_id, deleted_at)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_categories_scope ON categories(company_id, deleted_at, name)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_sales_scope_date ON sales(company_id, store_id, sale_date)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_customers_scope ON customers(company_id, store_id, deleted_at)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_inventory_product ON inventory_movements(product_id, created_at)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status, created_at)');
   }
 
   Future<void> _addSyncColumns(DatabaseExecutor db) async {
     await _addColumnIfMissing(db, 'products', 'sync_id', 'TEXT');
-    await _addColumnIfMissing(db, 'products', 'company_id', "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
-    await _addColumnIfMissing(db, 'products', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
-    await _addColumnIfMissing(db, 'products', 'created_by', "TEXT DEFAULT '$defaultUserId'");
-    await _addColumnIfMissing(db, 'products', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
+    await _addColumnIfMissing(db, 'products', 'company_id',
+        "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
+    await _addColumnIfMissing(
+        db, 'products', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
+    await _addColumnIfMissing(
+        db, 'products', 'created_by', "TEXT DEFAULT '$defaultUserId'");
+    await _addColumnIfMissing(
+        db, 'products', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
     await _addColumnIfMissing(db, 'products', 'deleted_at', 'TEXT');
-    await _addColumnIfMissing(db, 'products', 'version', 'INTEGER NOT NULL DEFAULT 1');
+    await _addColumnIfMissing(
+        db, 'products', 'version', 'INTEGER NOT NULL DEFAULT 1');
 
     await _addColumnIfMissing(db, 'sales', 'sync_id', 'TEXT');
-    await _addColumnIfMissing(db, 'sales', 'company_id', "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
-    await _addColumnIfMissing(db, 'sales', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
-    await _addColumnIfMissing(db, 'sales', 'register_id', "TEXT NOT NULL DEFAULT '$defaultRegisterId'");
-    await _addColumnIfMissing(db, 'sales', 'created_by', "TEXT DEFAULT '$defaultUserId'");
-    await _addColumnIfMissing(db, 'sales', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
+    await _addColumnIfMissing(
+        db, 'sales', 'company_id', "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
+    await _addColumnIfMissing(
+        db, 'sales', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
+    await _addColumnIfMissing(db, 'sales', 'register_id',
+        "TEXT NOT NULL DEFAULT '$defaultRegisterId'");
+    await _addColumnIfMissing(
+        db, 'sales', 'created_by', "TEXT DEFAULT '$defaultUserId'");
+    await _addColumnIfMissing(
+        db, 'sales', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
     await _addColumnIfMissing(db, 'sales', 'deleted_at', 'TEXT');
-    await _addColumnIfMissing(db, 'sales', 'version', 'INTEGER NOT NULL DEFAULT 1');
+    await _addColumnIfMissing(
+        db, 'sales', 'version', 'INTEGER NOT NULL DEFAULT 1');
 
     await _addColumnIfMissing(db, 'sale_items', 'sync_id', 'TEXT');
-    await _addColumnIfMissing(db, 'sale_items', 'company_id', "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
-    await _addColumnIfMissing(db, 'sale_items', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
+    await _addColumnIfMissing(db, 'sale_items', 'company_id',
+        "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
+    await _addColumnIfMissing(db, 'sale_items', 'store_id',
+        "TEXT NOT NULL DEFAULT '$defaultStoreId'");
     await _addColumnIfMissing(db, 'sale_items', 'sale_sync_id', 'TEXT');
     await _addColumnIfMissing(db, 'sale_items', 'product_sync_id', 'TEXT');
     await _addColumnIfMissing(db, 'sale_items', 'created_at', 'TEXT');
-    await _addColumnIfMissing(db, 'sale_items', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
+    await _addColumnIfMissing(
+        db, 'sale_items', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
     await _addColumnIfMissing(db, 'sale_items', 'deleted_at', 'TEXT');
-    await _addColumnIfMissing(db, 'sale_items', 'version', 'INTEGER NOT NULL DEFAULT 1');
+    await _addColumnIfMissing(
+        db, 'sale_items', 'version', 'INTEGER NOT NULL DEFAULT 1');
 
     await _addColumnIfMissing(db, 'customers', 'sync_id', 'TEXT');
-    await _addColumnIfMissing(db, 'customers', 'company_id', "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
-    await _addColumnIfMissing(db, 'customers', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
+    await _addColumnIfMissing(db, 'customers', 'company_id',
+        "TEXT NOT NULL DEFAULT '$defaultCompanyId'");
+    await _addColumnIfMissing(
+        db, 'customers', 'store_id', "TEXT NOT NULL DEFAULT '$defaultStoreId'");
     await _addColumnIfMissing(db, 'customers', 'updated_at', 'TEXT');
-    await _addColumnIfMissing(db, 'customers', 'created_by', "TEXT DEFAULT '$defaultUserId'");
-    await _addColumnIfMissing(db, 'customers', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
+    await _addColumnIfMissing(
+        db, 'customers', 'created_by', "TEXT DEFAULT '$defaultUserId'");
+    await _addColumnIfMissing(
+        db, 'customers', 'sync_status', "TEXT NOT NULL DEFAULT '$_synced'");
     await _addColumnIfMissing(db, 'customers', 'deleted_at', 'TEXT');
-    await _addColumnIfMissing(db, 'customers', 'version', 'INTEGER NOT NULL DEFAULT 1');
+    await _addColumnIfMissing(
+        db, 'customers', 'version', 'INTEGER NOT NULL DEFAULT 1');
   }
 
-  Future<void> _addColumnIfMissing(DatabaseExecutor db, String table, String column, String definition) async {
+  Future<void> _addColumnIfMissing(DatabaseExecutor db, String table,
+      String column, String definition) async {
     final columns = await db.rawQuery('PRAGMA table_info($table)');
     final exists = columns.any((row) => row['name'] == column);
     if (!exists) {
@@ -373,47 +445,60 @@ class DatabaseService {
 
   Future<void> _ensureDefaultTenant(DatabaseExecutor db) async {
     final now = DateTime.now().toIso8601String();
-    await db.insert('companies', {
-      'id': defaultCompanyId,
-      'name': 'Local Company',
-      'plan': 'local',
-      'subscription_status': 'local',
-      'created_at': now,
-      'updated_at': now,
-      'sync_status': _pendingSync,
-    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.insert(
+        'companies',
+        {
+          'id': defaultCompanyId,
+          'name': 'Local Company',
+          'plan': 'starter',
+          'subscription_status': 'pending',
+          'created_at': now,
+          'updated_at': now,
+          'sync_status': _pendingSync,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore);
 
-    await db.insert('stores', {
-      'id': defaultStoreId,
-      'company_id': defaultCompanyId,
-      'name': 'Main Store',
-      'created_at': now,
-      'updated_at': now,
-      'sync_status': _pendingSync,
-    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.insert(
+        'stores',
+        {
+          'id': defaultStoreId,
+          'company_id': defaultCompanyId,
+          'name': 'Main Store',
+          'created_at': now,
+          'updated_at': now,
+          'sync_status': _pendingSync,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore);
 
-    await db.insert('registers', {
-      'id': defaultRegisterId,
-      'company_id': defaultCompanyId,
-      'store_id': defaultStoreId,
-      'name': 'Main Register',
-      'created_at': now,
-      'updated_at': now,
-      'sync_status': _pendingSync,
-    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.insert(
+        'registers',
+        {
+          'id': defaultRegisterId,
+          'company_id': defaultCompanyId,
+          'store_id': defaultStoreId,
+          'name': 'Main Register',
+          'created_at': now,
+          'updated_at': now,
+          'sync_status': _pendingSync,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore);
 
-    await db.insert('app_users', {
-      'id': defaultUserId,
-      'company_id': defaultCompanyId,
-      'name': 'Owner',
-      'role': 'owner',
-      'created_at': now,
-      'updated_at': now,
-      'sync_status': _pendingSync,
-    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.insert(
+        'app_users',
+        {
+          'id': defaultUserId,
+          'company_id': defaultCompanyId,
+          'name': 'Owner',
+          'role': 'owner',
+          'created_at': now,
+          'updated_at': now,
+          'sync_status': _pendingSync,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
   Future<void> _backfillSyncMetadata(DatabaseExecutor db) async {
+    await _backfillTableSyncIds(db, 'categories', 'cat');
     await _backfillTableSyncIds(db, 'products', 'prd');
     await _backfillTableSyncIds(db, 'sales', 'sale');
     await _backfillTableSyncIds(db, 'sale_items', 'item');
@@ -421,7 +506,8 @@ class DatabaseService {
     await _backfillSaleItemReferences(db);
   }
 
-  Future<void> _backfillTableSyncIds(DatabaseExecutor db, String table, String prefix) async {
+  Future<void> _backfillTableSyncIds(
+      DatabaseExecutor db, String table, String prefix) async {
     final rows = await db.query(
       table,
       columns: ['id'],
@@ -429,7 +515,8 @@ class DatabaseService {
       whereArgs: [''],
     );
     for (final row in rows) {
-      await db.update(table, {'sync_id': _newSyncId(prefix)}, where: 'id = ?', whereArgs: [row['id']]);
+      await db.update(table, {'sync_id': _newSyncId(prefix)},
+          where: 'id = ?', whereArgs: [row['id']]);
     }
   }
 
@@ -463,12 +550,20 @@ class DatabaseService {
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
-    final cleanCompanyName = companyName.trim().isEmpty ? 'Local Company' : companyName.trim();
-    final cleanOwnerName = ownerName.trim().isEmpty ? 'Owner' : ownerName.trim();
-    final cleanStoreName = (storeName == null || storeName.trim().isEmpty) ? cleanCompanyName : storeName.trim();
-    final cleanCompanyId = (companyId == null || companyId.trim().isEmpty) ? _companyId : companyId.trim();
-    final cleanStoreId = (storeId == null || storeId.trim().isEmpty) ? _storeId : storeId.trim();
-    final cleanUserId = (userId == null || userId.trim().isEmpty) ? _userId : userId.trim();
+    final cleanCompanyName =
+        companyName.trim().isEmpty ? 'Local Company' : companyName.trim();
+    final cleanOwnerName =
+        ownerName.trim().isEmpty ? 'Owner' : ownerName.trim();
+    final cleanStoreName = (storeName == null || storeName.trim().isEmpty)
+        ? cleanCompanyName
+        : storeName.trim();
+    final cleanCompanyId = (companyId == null || companyId.trim().isEmpty)
+        ? _companyId
+        : companyId.trim();
+    final cleanStoreId =
+        (storeId == null || storeId.trim().isEmpty) ? _storeId : storeId.trim();
+    final cleanUserId =
+        (userId == null || userId.trim().isEmpty) ? _userId : userId.trim();
     final cleanRole = role.trim().isEmpty ? 'owner' : role.trim().toLowerCase();
 
     _companyId = cleanCompanyId;
@@ -485,39 +580,48 @@ class DatabaseService {
         userId: cleanUserId,
       );
 
-      await txn.insert('companies', {
-        'id': cleanCompanyId,
-        'name': cleanCompanyName,
-        'owner_user_id': cleanUserId,
-        'plan': 'local',
-        'subscription_status': 'local',
-        'created_at': now,
-        'updated_at': now,
-        'sync_status': _pendingSync,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'companies',
+          {
+            'id': cleanCompanyId,
+            'name': cleanCompanyName,
+            'owner_user_id': cleanUserId,
+            'plan': 'starter',
+            'subscription_status': 'pending',
+            'created_at': now,
+            'updated_at': now,
+            'sync_status': _pendingSync,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
 
-      await txn.insert('stores', {
-        'id': cleanStoreId,
-        'company_id': cleanCompanyId,
-        'name': cleanStoreName,
-        'address': storeAddress?.trim(),
-        'created_at': now,
-        'updated_at': now,
-        'sync_status': _pendingSync,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'stores',
+          {
+            'id': cleanStoreId,
+            'company_id': cleanCompanyId,
+            'name': cleanStoreName,
+            'address': storeAddress?.trim(),
+            'created_at': now,
+            'updated_at': now,
+            'sync_status': _pendingSync,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
 
-      await txn.insert('app_users', {
-        'id': cleanUserId,
-        'company_id': cleanCompanyId,
-        'store_id': cleanStoreId,
-        'register_id': '${cleanStoreId}_register',
-        'name': cleanOwnerName,
-        'email': email.trim().toLowerCase(),
-        'role': cleanRole,
-        'created_at': now,
-        'updated_at': now,
-        'sync_status': _pendingSync,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'app_users',
+          {
+            'id': cleanUserId,
+            'company_id': cleanCompanyId,
+            'store_id': cleanStoreId,
+            'register_id': '${cleanStoreId}_register',
+            'name': cleanOwnerName,
+            'email': email.trim().toLowerCase(),
+            'role': cleanRole,
+            'created_at': now,
+            'updated_at': now,
+            'sync_status': _pendingSync,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
 
       await _enqueueSyncChange(txn, 'company', cleanCompanyId, 'upsert', {
         'id': cleanCompanyId,
@@ -525,8 +629,10 @@ class DatabaseService {
         'store_id': cleanStoreId,
         'name': cleanCompanyName,
         'owner_user_id': cleanUserId,
-        'plan': 'local',
-        'subscription_status': 'local',
+        'plan': 'starter',
+        'subscription_status': 'pending',
+        'operating_status': 'paused',
+        'suspension_reason': 'Awaiting subscription activation',
         'updated_at': now,
         'sync_status': _pendingSync,
       });
@@ -562,7 +668,8 @@ class DatabaseService {
     final companyId = (company['id'] ?? _companyId).toString();
     final storeId = (store['id'] ?? user['store_id'] ?? _storeId).toString();
     final userId = (user['id'] ?? _userId).toString();
-    final registerId = (user['register_id'] ?? '${storeId}_register').toString();
+    final registerId =
+        (user['register_id'] ?? '${storeId}_register').toString();
     final role = (user['role'] ?? _role).toString().toLowerCase();
     final now = DateTime.now().toIso8601String();
 
@@ -573,39 +680,50 @@ class DatabaseService {
     _role = role;
 
     await db.transaction((txn) async {
-      await txn.insert('companies', {
-        'id': companyId,
-        'name': (company['name'] ?? 'Company').toString(),
-        'owner_user_id': company['owner_user_id']?.toString(),
-        'plan': (company['plan'] ?? 'local').toString(),
-        'subscription_status': (company['subscription_status'] ?? 'local').toString(),
-        'created_at': (company['created_at'] ?? now).toString(),
-        'updated_at': (company['updated_at'] ?? now).toString(),
-        'sync_status': _synced,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'companies',
+          {
+            'id': companyId,
+            'name': (company['name'] ?? 'Company').toString(),
+            'owner_user_id': company['owner_user_id']?.toString(),
+            'plan': (company['plan'] ?? 'starter').toString(),
+            'subscription_status':
+                (company['subscription_status'] ?? 'pending').toString(),
+            'created_at': (company['created_at'] ?? now).toString(),
+            'updated_at': (company['updated_at'] ?? now).toString(),
+            'sync_status': _synced,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
 
-      await txn.insert('stores', {
-        'id': storeId,
-        'company_id': companyId,
-        'name': (store['name'] ?? company['name'] ?? 'Main Store').toString(),
-        'address': store['address']?.toString(),
-        'created_at': (store['created_at'] ?? now).toString(),
-        'updated_at': (store['updated_at'] ?? now).toString(),
-        'sync_status': _synced,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'stores',
+          {
+            'id': storeId,
+            'company_id': companyId,
+            'name':
+                (store['name'] ?? company['name'] ?? 'Main Store').toString(),
+            'address': store['address']?.toString(),
+            'created_at': (store['created_at'] ?? now).toString(),
+            'updated_at': (store['updated_at'] ?? now).toString(),
+            'sync_status': _synced,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
 
-      await txn.insert('app_users', {
-        'id': userId,
-        'company_id': companyId,
-        'store_id': storeId,
-        'register_id': registerId,
-        'name': (user['name'] ?? user['email'] ?? 'User').toString(),
-        'email': user['email']?.toString(),
-        'role': role,
-        'created_at': (user['created_at'] ?? now).toString(),
-        'updated_at': (user['updated_at'] ?? now).toString(),
-        'sync_status': _synced,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert(
+          'app_users',
+          {
+            'id': userId,
+            'company_id': companyId,
+            'store_id': storeId,
+            'register_id': registerId,
+            'name': (user['name'] ?? user['email'] ?? 'User').toString(),
+            'email': user['email']?.toString(),
+            'role': role,
+            'created_at': (user['created_at'] ?? now).toString(),
+            'updated_at': (user['updated_at'] ?? now).toString(),
+            'sync_status': _synced,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace);
     });
   }
 
@@ -617,7 +735,13 @@ class DatabaseService {
   }) async {
     if (companyId == defaultCompanyId && storeId == defaultStoreId) return;
 
-    for (final table in const ['products', 'sales', 'sale_items', 'customers', 'inventory_movements']) {
+    for (final table in const [
+      'products',
+      'sales',
+      'sale_items',
+      'customers',
+      'inventory_movements'
+    ]) {
       await db.update(
         table,
         {'company_id': companyId, 'store_id': storeId},
@@ -626,7 +750,20 @@ class DatabaseService {
       );
     }
 
-    for (final table in const ['products', 'sales', 'customers', 'inventory_movements']) {
+    await db.update(
+      'categories',
+      {'company_id': companyId},
+      where: 'company_id = ?',
+      whereArgs: [defaultCompanyId],
+    );
+
+    for (final table in const [
+      'products',
+      'sales',
+      'customers',
+      'inventory_movements',
+      'categories'
+    ]) {
       await db.update(
         table,
         {'created_by': userId},
@@ -637,7 +774,11 @@ class DatabaseService {
 
     await db.update(
       'sync_queue',
-      {'company_id': companyId, 'store_id': storeId, 'updated_at': DateTime.now().toIso8601String()},
+      {
+        'company_id': companyId,
+        'store_id': storeId,
+        'updated_at': DateTime.now().toIso8601String()
+      },
       where: 'company_id = ? OR store_id = ?',
       whereArgs: [defaultCompanyId, defaultStoreId],
     );
@@ -662,7 +803,14 @@ class DatabaseService {
 
     await db.rawUpdate(
       'UPDATE sync_queue SET payload_json = REPLACE(REPLACE(REPLACE(payload_json, ?, ?), ?, ?), ?, ?)',
-      [defaultCompanyId, companyId, defaultStoreId, storeId, defaultUserId, userId],
+      [
+        defaultCompanyId,
+        companyId,
+        defaultStoreId,
+        storeId,
+        defaultUserId,
+        userId
+      ],
     );
   }
 
@@ -706,6 +854,56 @@ class DatabaseService {
   }
 
   // Product methods
+  Future<List<String>> getAllCategories() async {
+    final db = await database;
+    final saved = await db.query('categories',
+        columns: ['name'],
+        where: 'company_id = ? AND deleted_at IS NULL',
+        whereArgs: [_companyId],
+        orderBy: 'name COLLATE NOCASE ASC');
+    final legacy = await db.rawQuery(
+        'SELECT DISTINCT category AS name FROM products WHERE company_id = ? AND deleted_at IS NULL AND category IS NOT NULL AND TRIM(category) != ?',
+        [_companyId, '']);
+    final names = <String>{};
+    for (final row in [...saved, ...legacy]) {
+      final name = row['name']?.toString().trim();
+      if (name != null && name.isNotEmpty) names.add(name);
+    }
+    return names.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  }
+
+  Future<String> addCategory(String categoryName) async {
+    final name = categoryName.trim();
+    if (name.isEmpty) throw ArgumentError('Category name is required.');
+    final normalized = name.toLowerCase();
+    final db = await database;
+    return db.transaction((txn) async {
+      final existing = await txn.query('categories',
+          where: 'company_id = ? AND normalized_name = ?',
+          whereArgs: [_companyId, normalized],
+          limit: 1);
+      if (existing.isNotEmpty) return existing.first['sync_id'].toString();
+      final now = DateTime.now().toIso8601String();
+      final syncId = _newSyncId('cat');
+      final row = <String, dynamic>{
+        'sync_id': syncId,
+        'company_id': _companyId,
+        'name': name,
+        'normalized_name': normalized,
+        'created_at': now,
+        'updated_at': now,
+        'created_by': _userId,
+        'sync_status': _pendingSync,
+        'version': 1
+      };
+      final id = await txn.insert('categories', row);
+      await _enqueueSyncChange(txn, 'category', syncId, 'create', row,
+          localId: id);
+      return syncId;
+    });
+  }
+
   Future<List<Map<String, dynamic>>> getAllProducts() async {
     final db = await database;
     return await db.query(
@@ -730,8 +928,11 @@ class DatabaseService {
 
     return await db.transaction((txn) async {
       final id = await txn.insert('products', product);
-      final row = await txn.query('products', where: 'id = ?', whereArgs: [id], limit: 1);
-      await _enqueueSyncChange(txn, 'product', product['sync_id'].toString(), 'create', row.first, localId: id);
+      final row = await txn.query('products',
+          where: 'id = ?', whereArgs: [id], limit: 1);
+      await _enqueueSyncChange(
+          txn, 'product', product['sync_id'].toString(), 'create', row.first,
+          localId: id);
       return id;
     });
   }
@@ -748,7 +949,8 @@ class DatabaseService {
         where: 'id = ? AND company_id = ? AND store_id = ?',
         whereArgs: [id, _companyId, _storeId],
       );
-      await txn.rawUpdate('UPDATE products SET version = version + 1 WHERE id = ?', [id]);
+      await txn.rawUpdate(
+          'UPDATE products SET version = version + 1 WHERE id = ?', [id]);
       final row = await txn.query(
         'products',
         where: 'id = ? AND company_id = ? AND store_id = ?',
@@ -756,7 +958,9 @@ class DatabaseService {
         limit: 1,
       );
       if (row.isNotEmpty) {
-        await _enqueueSyncChange(txn, 'product', row.first['sync_id'].toString(), 'update', row.first, localId: id);
+        await _enqueueSyncChange(txn, 'product',
+            row.first['sync_id'].toString(), 'update', row.first,
+            localId: id);
       }
       return updated;
     });
@@ -772,7 +976,8 @@ class DatabaseService {
         where: 'id = ? AND company_id = ? AND store_id = ?',
         whereArgs: [id, _companyId, _storeId],
       );
-      await txn.rawUpdate('UPDATE products SET version = version + 1 WHERE id = ?', [id]);
+      await txn.rawUpdate(
+          'UPDATE products SET version = version + 1 WHERE id = ?', [id]);
       final row = await txn.query(
         'products',
         where: 'id = ? AND company_id = ? AND store_id = ?',
@@ -780,7 +985,9 @@ class DatabaseService {
         limit: 1,
       );
       if (row.isNotEmpty) {
-        await _enqueueSyncChange(txn, 'product', row.first['sync_id'].toString(), 'delete', row.first, localId: id);
+        await _enqueueSyncChange(txn, 'product',
+            row.first['sync_id'].toString(), 'delete', row.first,
+            localId: id);
       }
       return updated;
     });
@@ -790,14 +997,16 @@ class DatabaseService {
     final db = await database;
     final results = await db.query(
       'products',
-      where: 'id = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL',
+      where:
+          'id = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL',
       whereArgs: [id, _companyId, _storeId],
     );
     return results.isNotEmpty ? results.first : null;
   }
 
   // Sales methods
-  Future<int> addSale(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
+  Future<int> addSale(
+      Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
     sale['sync_id'] ??= _newSyncId('sale');
@@ -811,22 +1020,27 @@ class DatabaseService {
 
     return await db.transaction((txn) async {
       final saleId = await txn.insert('sales', sale);
-      final saleRow = await txn.query('sales', where: 'id = ?', whereArgs: [saleId], limit: 1);
-      await _enqueueSyncChange(txn, 'sale', sale['sync_id'].toString(), 'create', saleRow.first, localId: saleId);
+      final saleRow = await txn.query('sales',
+          where: 'id = ?', whereArgs: [saleId], limit: 1);
+      await _enqueueSyncChange(
+          txn, 'sale', sale['sync_id'].toString(), 'create', saleRow.first,
+          localId: saleId);
 
       for (var item in items) {
         final productId = item['product_id'];
         final productRows = await txn.query(
           'products',
-          columns: ['sync_id'],
-          where: 'id = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL',
+          columns: ['sync_id', 'name', 'stock_quantity'],
+          where:
+              'id = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL',
           whereArgs: [productId, _companyId, _storeId],
           limit: 1,
         );
         if (productRows.isEmpty) {
           throw StateError('Product does not belong to the active store.');
         }
-        final productSyncId = productRows.isNotEmpty ? productRows.first['sync_id']?.toString() : null;
+        final productRow = productRows.first;
+        final productSyncId = productRow['sync_id']?.toString();
 
         item['sync_id'] ??= _newSyncId('item');
         item['company_id'] ??= sale['company_id'];
@@ -838,8 +1052,11 @@ class DatabaseService {
         item['sync_status'] = _pendingSync;
         item['version'] ??= 1;
         final saleItemId = await txn.insert('sale_items', item);
-        final saleItemRow = await txn.query('sale_items', where: 'id = ?', whereArgs: [saleItemId], limit: 1);
-        await _enqueueSyncChange(txn, 'sale_item', item['sync_id'].toString(), 'create', saleItemRow.first, localId: saleItemId);
+        final saleItemRow = await txn.query('sale_items',
+            where: 'id = ?', whereArgs: [saleItemId], limit: 1);
+        await _enqueueSyncChange(txn, 'sale_item', item['sync_id'].toString(),
+            'create', saleItemRow.first,
+            localId: saleItemId);
 
         double quantity;
         if (item['quantity'] is num) {
@@ -847,10 +1064,42 @@ class DatabaseService {
         } else {
           quantity = double.tryParse(item['quantity']?.toString() ?? '') ?? 0.0;
         }
-        await txn.rawUpdate(
-          'UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND company_id = ? AND store_id = ?',
-          [quantity, productId, _companyId, _storeId],
+        if (!quantity.isFinite || quantity <= 0) {
+          throw StateError(
+              'Sale item quantity must be a finite value greater than zero.');
+        }
+
+        final available =
+            (productRow['stock_quantity'] as num?)?.toDouble() ?? 0.0;
+        if (available + 0.000001 < quantity) {
+          throw InsufficientStockException(
+            productId: productId,
+            productName: productRow['name']?.toString(),
+            available: available,
+            requested: quantity,
+          );
+        }
+
+        final stockUpdated = await txn.rawUpdate(
+          '''
+          UPDATE products
+          SET stock_quantity = stock_quantity - ?
+          WHERE id = ?
+            AND company_id = ?
+            AND store_id = ?
+            AND deleted_at IS NULL
+            AND stock_quantity + 0.000001 >= ?
+          ''',
+          [quantity, productId, _companyId, _storeId, quantity],
         );
+        if (stockUpdated != 1) {
+          throw InsufficientStockException(
+            productId: productId,
+            productName: productRow['name']?.toString(),
+            available: available,
+            requested: quantity,
+          );
+        }
 
         final movement = {
           'sync_id': _newSyncId('mov'),
@@ -869,7 +1118,8 @@ class DatabaseService {
           'version': 1,
         };
         final movementId = await txn.insert('inventory_movements', movement);
-        final movementRow = await txn.query('inventory_movements', where: 'id = ?', whereArgs: [movementId], limit: 1);
+        final movementRow = await txn.query('inventory_movements',
+            where: 'id = ?', whereArgs: [movementId], limit: 1);
         await _enqueueSyncChange(
           txn,
           'inventory_movement',
@@ -896,12 +1146,15 @@ class DatabaseService {
 
   Future<List<Map<String, dynamic>>> getSalesByDate(DateTime date) async {
     final db = await database;
-    final startOfDay = DateTime(date.year, date.month, date.day).toIso8601String();
-    final endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59).toIso8601String();
+    final startOfDay =
+        DateTime(date.year, date.month, date.day).toIso8601String();
+    final endOfDay =
+        DateTime(date.year, date.month, date.day, 23, 59, 59).toIso8601String();
 
     return await db.query(
       'sales',
-      where: 'company_id = ? AND store_id = ? AND sale_date >= ? AND sale_date <= ? AND deleted_at IS NULL',
+      where:
+          'company_id = ? AND store_id = ? AND sale_date >= ? AND sale_date <= ? AND deleted_at IS NULL',
       whereArgs: [_companyId, _storeId, startOfDay, endOfDay],
       orderBy: 'sale_date DESC',
     );
@@ -923,8 +1176,10 @@ class DatabaseService {
 
   Future<Map<String, dynamic>> getDailySalesSummary(DateTime date) async {
     final db = await database;
-    final startOfDay = DateTime(date.year, date.month, date.day).toIso8601String();
-    final endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59).toIso8601String();
+    final startOfDay =
+        DateTime(date.year, date.month, date.day).toIso8601String();
+    final endOfDay =
+        DateTime(date.year, date.month, date.day, 23, 59, 59).toIso8601String();
 
     final result = await db.rawQuery('''
       SELECT
@@ -967,8 +1222,11 @@ class DatabaseService {
 
     return await db.transaction((txn) async {
       final id = await txn.insert('customers', customer);
-      final row = await txn.query('customers', where: 'id = ?', whereArgs: [id], limit: 1);
-      await _enqueueSyncChange(txn, 'customer', customer['sync_id'].toString(), 'create', row.first, localId: id);
+      final row = await txn.query('customers',
+          where: 'id = ?', whereArgs: [id], limit: 1);
+      await _enqueueSyncChange(
+          txn, 'customer', customer['sync_id'].toString(), 'create', row.first,
+          localId: id);
       return id;
     });
   }
@@ -984,7 +1242,8 @@ class DatabaseService {
         where: 'id = ? AND company_id = ? AND store_id = ?',
         whereArgs: [id, _companyId, _storeId],
       );
-      await txn.rawUpdate('UPDATE customers SET version = version + 1 WHERE id = ?', [id]);
+      await txn.rawUpdate(
+          'UPDATE customers SET version = version + 1 WHERE id = ?', [id]);
       final row = await txn.query(
         'customers',
         where: 'id = ? AND company_id = ? AND store_id = ?',
@@ -992,7 +1251,9 @@ class DatabaseService {
         limit: 1,
       );
       if (row.isNotEmpty) {
-        await _enqueueSyncChange(txn, 'customer', row.first['sync_id'].toString(), 'update', row.first, localId: id);
+        await _enqueueSyncChange(txn, 'customer',
+            row.first['sync_id'].toString(), 'update', row.first,
+            localId: id);
       }
       return updated;
     });
@@ -1008,7 +1269,8 @@ class DatabaseService {
         where: 'id = ? AND company_id = ? AND store_id = ?',
         whereArgs: [id, _companyId, _storeId],
       );
-      await txn.rawUpdate('UPDATE customers SET version = version + 1 WHERE id = ?', [id]);
+      await txn.rawUpdate(
+          'UPDATE customers SET version = version + 1 WHERE id = ?', [id]);
       final row = await txn.query(
         'customers',
         where: 'id = ? AND company_id = ? AND store_id = ?',
@@ -1016,18 +1278,25 @@ class DatabaseService {
         limit: 1,
       );
       if (row.isNotEmpty) {
-        await _enqueueSyncChange(txn, 'customer', row.first['sync_id'].toString(), 'delete', row.first, localId: id);
+        await _enqueueSyncChange(txn, 'customer',
+            row.first['sync_id'].toString(), 'delete', row.first,
+            localId: id);
       }
       return updated;
     });
   }
 
-  Future<List<Map<String, dynamic>>> getPendingSyncQueue({int limit = 100, bool includeFailed = false}) async {
+  Future<List<Map<String, dynamic>>> getPendingSyncQueue(
+      {int limit = 100, bool includeFailed = false}) async {
     final db = await database;
     return await db.query(
       'sync_queue',
-      where: includeFailed ? 'company_id = ? AND status IN (?, ?)' : 'company_id = ? AND status = ?',
-      whereArgs: includeFailed ? [_companyId, _pendingSync, 'failed'] : [_companyId, _pendingSync],
+      where: includeFailed
+          ? 'company_id = ? AND status IN (?, ?)'
+          : 'company_id = ? AND status = ?',
+      whereArgs: includeFailed
+          ? [_companyId, _pendingSync, 'failed']
+          : [_companyId, _pendingSync],
       orderBy: 'created_at ASC',
       limit: limit,
     );
@@ -1087,13 +1356,15 @@ class DatabaseService {
     ''', ['failed', error, DateTime.now().toIso8601String(), queueId]);
   }
 
-  Future<void> upsertRemoteRows(String table, List<Map<String, dynamic>> rows) async {
+  Future<void> upsertRemoteRows(
+      String table, List<Map<String, dynamic>> rows) async {
     const allowedTables = {
       'products',
       'sales',
       'sale_items',
       'customers',
       'inventory_movements',
+      'categories',
     };
     if (!allowedTables.contains(table)) {
       throw ArgumentError('Unsupported sync table: $table');
@@ -1102,21 +1373,29 @@ class DatabaseService {
     await db.transaction((txn) async {
       for (final source in rows) {
         final row = Map<String, dynamic>.from(source);
-        final syncId = row['sync_id']?.toString().isNotEmpty == true ? row['sync_id'].toString() : row['id']?.toString();
+        final syncId = row['sync_id']?.toString().isNotEmpty == true
+            ? row['sync_id'].toString()
+            : row['id']?.toString();
         if (syncId == null || syncId.isEmpty) continue;
         row
           ..remove('id')
           ..remove('sync_meta')
           ..['sync_id'] = syncId
           ..['company_id'] = _companyId
-          ..['store_id'] = row['store_id'] ?? _storeId
           ..['sync_status'] = _synced;
+        if (table != 'categories')
+          row['store_id'] = row['store_id'] ?? _storeId;
 
-        final existing = await txn.query(table, columns: ['id'], where: 'sync_id = ?', whereArgs: [syncId], limit: 1);
+        final existing = await txn.query(table,
+            columns: ['id'],
+            where: 'sync_id = ?',
+            whereArgs: [syncId],
+            limit: 1);
         if (existing.isEmpty) {
           await txn.insert(table, row);
         } else {
-          await txn.update(table, row, where: 'sync_id = ?', whereArgs: [syncId]);
+          await txn
+              .update(table, row, where: 'sync_id = ?', whereArgs: [syncId]);
         }
       }
     });
@@ -1126,11 +1405,21 @@ class DatabaseService {
   Future<Map<String, dynamic>> exportData() async {
     final db = await database;
 
-    final products = await db.query('products', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-    final sales = await db.query('sales', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-    final saleItems = await db.query('sale_items', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-    final customers = await db.query('customers', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-    final inventoryMovements = await db.query('inventory_movements', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
+    final products = await db.query('products',
+        where: 'company_id = ? AND store_id = ?',
+        whereArgs: [_companyId, _storeId]);
+    final sales = await db.query('sales',
+        where: 'company_id = ? AND store_id = ?',
+        whereArgs: [_companyId, _storeId]);
+    final saleItems = await db.query('sale_items',
+        where: 'company_id = ? AND store_id = ?',
+        whereArgs: [_companyId, _storeId]);
+    final customers = await db.query('customers',
+        where: 'company_id = ? AND store_id = ?',
+        whereArgs: [_companyId, _storeId]);
+    final inventoryMovements = await db.query('inventory_movements',
+        where: 'company_id = ? AND store_id = ?',
+        whereArgs: [_companyId, _storeId]);
 
     return {
       'company_id': _companyId,
@@ -1148,40 +1437,71 @@ class DatabaseService {
     final db = await database;
 
     await db.transaction((txn) async {
-      await txn.delete('sync_queue', where: 'company_id = ?', whereArgs: [_companyId]);
-      await txn.delete('inventory_movements', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('sale_items', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('sales', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('products', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('customers', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
+      await txn.delete('sync_queue',
+          where: 'company_id = ?', whereArgs: [_companyId]);
+      await txn.delete('inventory_movements',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('sale_items',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('sales',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('products',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('customers',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
 
       if (data['products'] != null) {
         for (final product in data['products']) {
-          await txn.insert('products', {...Map<String, dynamic>.from(product), 'company_id': _companyId, 'store_id': _storeId});
+          await txn.insert('products', {
+            ...Map<String, dynamic>.from(product),
+            'company_id': _companyId,
+            'store_id': _storeId
+          });
         }
       }
 
       if (data['customers'] != null) {
         for (final customer in data['customers']) {
-          await txn.insert('customers', {...Map<String, dynamic>.from(customer), 'company_id': _companyId, 'store_id': _storeId});
+          await txn.insert('customers', {
+            ...Map<String, dynamic>.from(customer),
+            'company_id': _companyId,
+            'store_id': _storeId
+          });
         }
       }
 
       if (data['sales'] != null) {
         for (final sale in data['sales']) {
-          await txn.insert('sales', {...Map<String, dynamic>.from(sale), 'company_id': _companyId, 'store_id': _storeId});
+          await txn.insert('sales', {
+            ...Map<String, dynamic>.from(sale),
+            'company_id': _companyId,
+            'store_id': _storeId
+          });
         }
       }
 
       if (data['sale_items'] != null) {
         for (final item in data['sale_items']) {
-          await txn.insert('sale_items', {...Map<String, dynamic>.from(item), 'company_id': _companyId, 'store_id': _storeId});
+          await txn.insert('sale_items', {
+            ...Map<String, dynamic>.from(item),
+            'company_id': _companyId,
+            'store_id': _storeId
+          });
         }
       }
 
       if (data['inventory_movements'] != null) {
         for (final movement in data['inventory_movements']) {
-          await txn.insert('inventory_movements', {...Map<String, dynamic>.from(movement), 'company_id': _companyId, 'store_id': _storeId});
+          await txn.insert('inventory_movements', {
+            ...Map<String, dynamic>.from(movement),
+            'company_id': _companyId,
+            'store_id': _storeId
+          });
         }
       }
     });
@@ -1191,12 +1511,23 @@ class DatabaseService {
   Future<void> clearAllData() async {
     final db = await database;
     await db.transaction((txn) async {
-      await txn.delete('sync_queue', where: 'company_id = ?', whereArgs: [_companyId]);
-      await txn.delete('inventory_movements', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('sale_items', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('sales', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('products', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
-      await txn.delete('customers', where: 'company_id = ? AND store_id = ?', whereArgs: [_companyId, _storeId]);
+      await txn.delete('sync_queue',
+          where: 'company_id = ?', whereArgs: [_companyId]);
+      await txn.delete('inventory_movements',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('sale_items',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('sales',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('products',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
+      await txn.delete('customers',
+          where: 'company_id = ? AND store_id = ?',
+          whereArgs: [_companyId, _storeId]);
     });
   }
 

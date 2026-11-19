@@ -67,15 +67,20 @@ In the Firebase console:
 - Authentication: enable Email/Password sign-in.
 - Firestore Database: create a database.
 - Storage: enable when product images or backups are needed.
-- Functions: enable later when billing, subscription enforcement, or backend reports are added.
+- Hosting: used for the static React back office.
+- Functions: not required for the current employee flow. Keeping Functions out of the deployment avoids requiring Blaze.
 
-## 6. Deploy Firestore rules
+## 6. Build and deploy the back office and rules
 
 This repo includes `firestore.rules` and `firebase.json`.
 
 ```powershell
-firebase deploy --only firestore:rules
+npm --prefix admin-dashboard ci
+npm --prefix admin-dashboard run build
+firebase deploy --only firestore:rules,hosting
 ```
+
+The deployed back office is `https://shopaflow.web.app`. The POS app links owners, admins, and managers to this URL. To use a different Hosting site in a Flutter build, pass `--dart-define=BACK_OFFICE_URL=https://your-site.example`.
 
 ## 7. Resolve packages
 
@@ -93,4 +98,4 @@ flutter run
 
 ## Notes
 
-The app can still open before Firebase is configured. Login/register falls back to the temporary local account flow. Once Firebase is initialized, registration and login use Firebase Authentication, and the sync button can upload queued local changes to Firestore.
+The app can still open before Firebase is configured, but sign-in and registration require Firebase. Once initialized, registration and login use Firebase Authentication, and the sync button can upload queued local changes to Firestore.

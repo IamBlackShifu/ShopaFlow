@@ -8,6 +8,13 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseSigningEnv = mapOf(
+    "KEY_ALIAS" to System.getenv("KEY_ALIAS"),
+    "KEY_PASSWORD" to System.getenv("KEY_PASSWORD"),
+    "STORE_PASSWORD" to System.getenv("STORE_PASSWORD"),
+)
+val missingReleaseSigningEnv = releaseSigningEnv.filterValues { it.isNullOrBlank() }.keys
+
 android {
     namespace = "com.shopaflow.shopaflow"
     compileSdk = flutter.compileSdkVersion
@@ -34,10 +41,10 @@ android {
 
     signingConfigs {
         create("release") {
-            keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
-            keyPassword = System.getenv("KEY_PASSWORD") ?: "shopaflow123"
+            keyAlias = releaseSigningEnv["KEY_ALIAS"] ?: ""
+            keyPassword = releaseSigningEnv["KEY_PASSWORD"] ?: ""
             storeFile = file("upload-keystore-new.jks")
-            storePassword = System.getenv("STORE_PASSWORD") ?: "shopaflow123"
+            storePassword = releaseSigningEnv["STORE_PASSWORD"] ?: ""
         }
     }
 
@@ -53,4 +60,16 @@ android {
 
 flutter {
     source = "../.."
+}
+
+gradle.taskGraph.whenReady {
+    val requestedReleaseBuild = allTasks.any { task ->
+        task.name.contains("Release", ignoreCase = true)
+    }
+    if (requestedReleaseBuild && missingReleaseSigningEnv.isNotEmpty()) {
+        throw GradleException(
+            "Missing release signing environment variables: ${missingReleaseSigningEnv.joinToString(", ")}. " +
+                "Set KEY_ALIAS, KEY_PASSWORD, and STORE_PASSWORD before building a release."
+        )
+    }
 }

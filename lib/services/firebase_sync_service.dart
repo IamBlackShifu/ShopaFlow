@@ -43,14 +43,16 @@ class FirebaseSyncService {
   final DatabaseService _databaseService;
   final FirebaseFirestore? _firestore;
 
-  Future<SyncRunResult> syncPendingChanges({int limit = 50, bool retryFailed = true}) async {
+  Future<SyncRunResult> syncPendingChanges(
+      {int limit = 50, bool retryFailed = true}) async {
     if (Firebase.apps.isEmpty) {
       return const SyncRunResult(
         configured: false,
         attempted: 0,
         synced: 0,
         failed: 0,
-        message: 'Firebase is not initialized yet. Run FlutterFire configure and initialize Firebase in main().',
+        message:
+            'Firebase is not initialized yet. Run FlutterFire configure and initialize Firebase in main().',
       );
     }
 
@@ -58,7 +60,8 @@ class FirebaseSyncService {
       await _databaseService.retryFailedSyncItems();
     }
     final pending = List<Map<String, dynamic>>.from(
-      await _databaseService.getPendingSyncQueue(limit: limit, includeFailed: retryFailed),
+      await _databaseService.getPendingSyncQueue(
+          limit: limit, includeFailed: retryFailed),
     );
     pending.sort((a, b) => _syncPriority(a).compareTo(_syncPriority(b)));
     var synced = 0;
@@ -75,7 +78,8 @@ class FirebaseSyncService {
         synced++;
       } catch (error) {
         failed++;
-        await _databaseService.markSyncQueueItemFailed(queueId, error.toString());
+        await _databaseService.markSyncQueueItemFailed(
+            queueId, error.toString());
       }
     }
 
@@ -91,9 +95,9 @@ class FirebaseSyncService {
     switch (queueItem['entity_type']?.toString()) {
       case 'company':
         return 0;
-      case 'app_user':
-        return 1;
       case 'store':
+        return 1;
+      case 'app_user':
         return 2;
       case 'register':
         return 3;
@@ -127,14 +131,19 @@ class FirebaseSyncService {
     var records = 0;
     try {
       final companySnap = await companyRef.get();
-      final storeSnap = await companyRef.collection('stores').doc(storeId).get();
+      final storeSnap =
+          await companyRef.collection('stores').doc(storeId).get();
       DocumentSnapshot<Map<String, dynamic>>? userSnap;
       if (userId != null && userId.trim().isNotEmpty) {
         userSnap = await companyRef.collection('users').doc(userId).get();
       }
-      if (companySnap.exists && storeSnap.exists && (userSnap == null || userSnap.exists)) {
-        final company = _cleanFirestoreData(companySnap.data() ?? {})..['id'] = companySnap.id;
-        final store = _cleanFirestoreData(storeSnap.data() ?? {})..['id'] = storeSnap.id;
+      if (companySnap.exists &&
+          storeSnap.exists &&
+          (userSnap == null || userSnap.exists)) {
+        final company = _cleanFirestoreData(companySnap.data() ?? {})
+          ..['id'] = companySnap.id;
+        final store = _cleanFirestoreData(storeSnap.data() ?? {})
+          ..['id'] = storeSnap.id;
         final user = _cleanFirestoreData(userSnap?.data() ?? {})
           ..['id'] = userSnap?.id ?? userId
           ..['company_id'] = companyId
@@ -154,7 +163,10 @@ class FirebaseSyncService {
         'customers': 'customers',
         'inventory_movements': 'inventory_movements',
       }.entries) {
-        final snapshot = await companyRef.collection(entry.key).where('store_id', isEqualTo: storeId).get();
+        final snapshot = await companyRef
+            .collection(entry.key)
+            .where('store_id', isEqualTo: storeId)
+            .get();
         final rows = snapshot.docs.map((doc) {
           final data = _cleanFirestoreData(doc.data());
           data['sync_id'] ??= doc.id;
@@ -163,18 +175,30 @@ class FirebaseSyncService {
         await _databaseService.upsertRemoteRows(entry.value, rows);
         records += rows.length;
       }
+      final categorySnapshot = await companyRef.collection('categories').get();
+      final categories = categorySnapshot.docs.map((doc) {
+        final data = _cleanFirestoreData(doc.data());
+        data['sync_id'] ??= doc.id;
+        return data;
+      }).toList();
+      await _databaseService.upsertRemoteRows('categories', categories);
+      records += categories.length;
     } catch (error) {
-      return PullRunResult(configured: true, records: records, message: error.toString());
+      return PullRunResult(
+          configured: true, records: records, message: error.toString());
     }
 
     return PullRunResult(configured: true, records: records);
   }
 
-  Future<void> _pushQueueItem(FirebaseFirestore firestore, Map<String, dynamic> queueItem) async {
-    final payload = jsonDecode(queueItem['payload_json']?.toString() ?? '{}') as Map<String, dynamic>;
+  Future<void> _pushQueueItem(
+      FirebaseFirestore firestore, Map<String, dynamic> queueItem) async {
+    final payload = jsonDecode(queueItem['payload_json']?.toString() ?? '{}')
+        as Map<String, dynamic>;
     final entityType = queueItem['entity_type']?.toString() ?? '';
     final entityId = queueItem['entity_id']?.toString() ?? '';
-    final companyId = queueItem['company_id']?.toString() ?? DatabaseService.defaultCompanyId;
+    final companyId =
+        queueItem['company_id']?.toString() ?? DatabaseService.defaultCompanyId;
 
     if (entityType.isEmpty || entityId.isEmpty) {
       throw StateError('Sync queue item is missing entity metadata.');
@@ -190,34 +214,52 @@ class FirebaseSyncService {
     };
 
     if (entityType == 'company') {
-      await firestore.collection('companies').doc(companyId).set(docData, SetOptions(merge: true));
+      await firestore
+          .collection('companies')
+          .doc(companyId)
+          .set(docData, SetOptions(merge: true));
       return;
     }
 
     final collectionName = _collectionNameFor(entityType);
+    if (entityType == 'app_user') {
+      final batch = firestore.batch();
+      batch.set(
+        firestore
+            .collection('companies')
+            .doc(companyId)
+            .collection(collectionName)
+            .doc(entityId),
+        docData,
+        SetOptions(merge: true),
+      );
+      batch.set(
+        firestore
+            .collection('user_memberships')
+            .doc(entityId)
+            .collection('companies')
+            .doc(companyId),
+        {
+          'company_id': companyId,
+          'user_id': entityId,
+          'role': payload['role'] ?? 'cashier',
+          'company_name': payload['company_name'],
+          'store_id': payload['store_id'],
+          'register_id': payload['register_id'],
+          'updated_at': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+      await batch.commit();
+      return;
+    }
+
     await firestore
         .collection('companies')
         .doc(companyId)
         .collection(collectionName)
         .doc(entityId)
         .set(docData, SetOptions(merge: true));
-
-    if (entityType == 'app_user') {
-      await firestore
-          .collection('user_memberships')
-          .doc(entityId)
-          .collection('companies')
-          .doc(companyId)
-          .set({
-        'company_id': companyId,
-        'user_id': entityId,
-        'role': payload['role'] ?? 'cashier',
-        'company_name': payload['company_name'],
-        'store_id': payload['store_id'],
-        'register_id': payload['register_id'],
-        'updated_at': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-    }
   }
 
   String _collectionNameFor(String entityType) {
@@ -228,6 +270,8 @@ class FirebaseSyncService {
         return 'users';
       case 'product':
         return 'products';
+      case 'category':
+        return 'categories';
       case 'sale':
         return 'sales';
       case 'sale_item':
