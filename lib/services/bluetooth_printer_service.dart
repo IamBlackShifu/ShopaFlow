@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'printer_service_interface.dart';
 
 class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceInterface {
@@ -12,6 +13,28 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
   bool _isConnected = false;
   String _connectionStatus = 'Not connected';
   int _paperSize = 58; // 58mm or 80mm
+
+  BluetoothPrinterService() {
+    _restoreSavedPrinter();
+  }
+
+  Future<void> _restoreSavedPrinter() async {
+    final prefs = await SharedPreferences.getInstance();
+    final mac = prefs.getString('bluetooth_printer_mac');
+    final name = prefs.getString('bluetooth_printer_name');
+    final paperSize = prefs.getInt('bluetooth_printer_paper_size');
+    if (paperSize != null && (paperSize == 58 || paperSize == 80)) {
+      _paperSize = paperSize;
+    }
+    if (mac == null || mac.isEmpty) {
+      notifyListeners();
+      return;
+    }
+    _connectedPrinter = BluetoothInfo(name: name ?? 'Saved printer', macAdress: mac);
+    _connectionStatus = 'Reconnecting to ${name ?? 'saved printer'}...';
+    notifyListeners();
+    await connectToPrinter(_connectedPrinter!);
+  }
 
   List<BluetoothInfo> get availablePrinters => _availablePrinters;
   BluetoothInfo? get connectedPrinter => _connectedPrinter;
@@ -94,6 +117,9 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
         _connectedPrinter = printer;
         _isConnected = true;
         _connectionStatus = 'Connected to ${printer.name}';
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('bluetooth_printer_mac', printer.macAdress);
+        await prefs.setString('bluetooth_printer_name', printer.name);
       } else {
         _connectionStatus = 'Failed to connect to ${printer.name}';
       }
@@ -128,6 +154,9 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
   void setPaperSize(int size) {
     if (size == 58 || size == 80) {
       _paperSize = size;
+      SharedPreferences.getInstance().then(
+        (prefs) => prefs.setInt('bluetooth_printer_paper_size', size),
+      );
       notifyListeners();
     }
   }

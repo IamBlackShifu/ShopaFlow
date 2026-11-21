@@ -43,7 +43,7 @@ android {
         create("release") {
             keyAlias = releaseSigningEnv["KEY_ALIAS"] ?: ""
             keyPassword = releaseSigningEnv["KEY_PASSWORD"] ?: ""
-            storeFile = file("upload-keystore-new.jks")
+            storeFile = file("upload-keystore.jks")
             storePassword = releaseSigningEnv["STORE_PASSWORD"] ?: ""
         }
     }

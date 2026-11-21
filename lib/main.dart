@@ -21,6 +21,7 @@ import 'printer_settings.dart';
 import 'package:csv/csv.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:pdf/pdf.dart';
+import 'package:file_picker/file_picker.dart';
 
 // ================== MODELS & PROVIDERS ==================
 class ExchangeRateModel extends ChangeNotifier {
@@ -139,6 +140,10 @@ class AuthSessionModel extends ChangeNotifier {
   static const _storeIdKey = 'auth_store_id';
   static const _registerIdKey = 'auth_register_id';
   static const _roleKey = 'auth_role';
+  static const _subscriptionStatusKey = 'subscription_status';
+  static const _operatingStatusKey = 'subscription_operating_status';
+  static const _subscriptionDueDateKey = 'subscription_due_date';
+  static const _subscriptionReasonKey = 'subscription_suspension_reason';
 
   bool _isAuthenticated = false;
   String _userId = DatabaseService.defaultUserId;
@@ -153,9 +158,11 @@ class AuthSessionModel extends ChangeNotifier {
   String _subscriptionStatus = 'checking';
   String _operatingStatus = 'paused';
   String _suspensionReason = '';
+  DateTime? _subscriptionDueDate;
   bool _subscriptionResolved = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
       _companySubscription;
+  Timer? _subscriptionPollTimer;
 
   bool get isAuthenticated => _isAuthenticated;
   String get userId => _userId;
@@ -169,9 +176,13 @@ class AuthSessionModel extends ChangeNotifier {
   String get phone => _phone;
   String get subscriptionStatus => _subscriptionStatus;
   String get suspensionReason => _suspensionReason;
+  DateTime? get subscriptionDueDate => _subscriptionDueDate;
   bool get subscriptionResolved => _subscriptionResolved;
   bool get isSubscriptionActive =>
-      _subscriptionStatus == 'active' && _operatingStatus == 'active';
+      _subscriptionStatus == 'active' &&
+      _operatingStatus == 'active' &&
+      (_subscriptionDueDate == null ||
+          DateTime.now().isBefore(_subscriptionDueDate!));
   bool get canSell =>
       _hasAnyRole(const {'owner', 'admin', 'manager', 'cashier'});
   bool get canManageInventory =>
@@ -228,16 +239,63 @@ class AuthSessionModel extends ChangeNotifier {
 
   void _applyCompanyAccess(Map<String, dynamic>? data, {bool notify = false}) {
     _subscriptionStatus =
-        (data?['subscription_status'] ?? 'pending').toString().toLowerCase();
+        (data?['subscription_status'] ?? _subscriptionStatus)
+            .toString()
+            .toLowerCase();
     _operatingStatus =
-        (data?['operating_status'] ?? 'paused').toString().toLowerCase();
-    _suspensionReason = (data?['suspension_reason'] ?? '').toString();
+        (data?['operating_status'] ?? _operatingStatus).toString().toLowerCase();
+    _suspensionReason =
+        (data?['suspension_reason'] ?? _suspensionReason).toString();
+    _subscriptionDueDate = _parseSubscriptionDate(
+      data?['subscription_due_date'] ??
+          data?['next_due_date'] ??
+          data?['subscription_expires_at'],
+    ) ?? _subscriptionDueDate;
     _subscriptionResolved = true;
+    if (data != null) {
+      _persistSubscriptionCache();
+    }
     if (notify) notifyListeners();
+  }
+
+  DateTime? _parseSubscriptionDate(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String && value.trim().isNotEmpty) {
+      return DateTime.tryParse(value);
+    }
+    return null;
+  }
+
+  Future<void> _persistSubscriptionCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_subscriptionStatusKey, _subscriptionStatus);
+    await prefs.setString(_operatingStatusKey, _operatingStatus);
+    await prefs.setString(_subscriptionReasonKey, _suspensionReason);
+    if (_subscriptionDueDate != null) {
+      await prefs.setString(
+          _subscriptionDueDateKey, _subscriptionDueDate!.toIso8601String());
+    } else {
+      await prefs.remove(_subscriptionDueDateKey);
+    }
+  }
+
+  Future<void> _loadCachedSubscription(SharedPreferences prefs) async {
+    _subscriptionStatus =
+        prefs.getString(_subscriptionStatusKey) ?? 'pending';
+    _operatingStatus =
+        prefs.getString(_operatingStatusKey) ?? 'paused';
+    _suspensionReason = prefs.getString(_subscriptionReasonKey) ?? '';
+    final dueDate = prefs.getString(_subscriptionDueDateKey);
+    _subscriptionDueDate =
+        dueDate == null ? null : DateTime.tryParse(dueDate);
+    _subscriptionResolved = true;
   }
 
   Future<void> _watchCompanyAccess() async {
     await _companySubscription?.cancel();
+    _subscriptionPollTimer?.cancel();
+    _subscriptionPollTimer = null;
     if (Firebase.apps.isEmpty || _companyId.isEmpty) return;
     _companySubscription = FirebaseFirestore.instance
         .collection('companies')
@@ -252,11 +310,14 @@ class AuthSessionModel extends ChangeNotifier {
         _applyCompanyAccess(data, notify: true);
       },
       onError: (_) {
+        // Keep the last known subscription while the device is offline.
         _subscriptionResolved = true;
-        _subscriptionStatus = 'pending';
-        _operatingStatus = 'paused';
         notifyListeners();
       },
+    );
+    _subscriptionPollTimer = Timer.periodic(
+      const Duration(minutes: 15),
+      (_) => refreshSubscription(),
     );
   }
 
@@ -273,6 +334,7 @@ class AuthSessionModel extends ChangeNotifier {
       }
       _applyCompanyAccess(data, notify: true);
     } catch (_) {
+      // Offline refreshes must not revoke a previously cached subscription.
       _subscriptionResolved = true;
       notifyListeners();
     }
@@ -334,10 +396,8 @@ class AuthSessionModel extends ChangeNotifier {
       }
       await _watchCompanyAccess();
     } catch (_) {
-      // Subscription enforcement fails closed if cloud access cannot be verified.
+      // Subscription enforcement remains usable offline with cached access.
       _subscriptionResolved = true;
-      _subscriptionStatus = 'pending';
-      _operatingStatus = 'paused';
     }
   }
 
@@ -359,6 +419,7 @@ class AuthSessionModel extends ChangeNotifier {
     _registerId =
         _registerIdForStore(_storeId, prefs.getString(_registerIdKey));
     _role = prefs.getString(_roleKey) ?? 'owner';
+    await _loadCachedSubscription(prefs);
     if (Firebase.apps.isNotEmpty && FirebaseAuth.instance.currentUser != null) {
       await _loadFirebaseMembership(_userId);
       await prefs.setString(_companyIdKey, _companyId);
@@ -397,8 +458,7 @@ class AuthSessionModel extends ChangeNotifier {
       _companyName = prefs.getString(_companyNameKey) ?? '';
       _phone = prefs.getString(_phoneKey) ?? '';
       _subscriptionResolved = false;
-      _subscriptionStatus = 'checking';
-      _operatingStatus = 'paused';
+      await _loadCachedSubscription(prefs);
       await _loadFirebaseMembership(_userId);
       await prefs.setBool(_loggedInKey, true);
       await prefs.setString(_userIdKey, _userId);
@@ -492,6 +552,8 @@ class AuthSessionModel extends ChangeNotifier {
     _isAuthenticated = false;
     await _companySubscription?.cancel();
     _companySubscription = null;
+    _subscriptionPollTimer?.cancel();
+    _subscriptionPollTimer = null;
     _subscriptionResolved = false;
     _subscriptionStatus = 'checking';
     _operatingStatus = 'paused';
@@ -503,6 +565,7 @@ class AuthSessionModel extends ChangeNotifier {
   @override
   void dispose() {
     _companySubscription?.cancel();
+    _subscriptionPollTimer?.cancel();
     super.dispose();
   }
 }
@@ -2116,12 +2179,60 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends State<MainScreen>
+    with WidgetsBindingObserver {
   static const _backOfficeUrl = String.fromEnvironment(
     'BACK_OFFICE_URL',
     defaultValue: 'https://shopaflow.web.app',
   );
   int _index = 0;
+  Timer? _syncTimer;
+  bool _syncInProgress = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _runAutomaticSync();
+      _syncTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => _runAutomaticSync(),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _syncTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _runAutomaticSync();
+    }
+  }
+
+  Future<void> _runAutomaticSync() async {
+    if (_syncInProgress || !mounted) return;
+    final auth = context.read<AuthSessionModel>();
+    if (!auth.isAuthenticated) return;
+    _syncInProgress = true;
+    try {
+      final db = context.read<DatabaseService>();
+      auth.configureDatabase(db);
+      await db.migrateLegacyTenantToActive();
+      await FirebaseSyncService(databaseService: db)
+          .syncPendingChanges(retryFailed: true);
+    } catch (_) {
+      // Changes remain queued and will be retried by the periodic sync.
+    } finally {
+      _syncInProgress = false;
+    }
+  }
 
   Future<void> _openBackOffice() async {
     final opened = await launchUrl(
@@ -4443,29 +4554,35 @@ class _ProductsScreenState extends State<ProductsScreen> {
   }
 
   Future<void> _performCSVImport() async {
-    final csvController = TextEditingController();
-    final csvContent = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Paste CSV Content'),
-        content: TextField(
-            controller: csvController,
-            maxLines: 10,
-            decoration: const InputDecoration(
-                border: OutlineInputBorder(), hintText: 'Name,Desc,Price...')),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
-          ElevatedButton(
-              onPressed: () => Navigator.pop(context, csvController.text),
-              child: const Text('Import')),
-        ],
-      ),
-    );
-    csvController.dispose();
-    if (csvContent != null && csvContent.trim().isNotEmpty)
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['csv'],
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final file = result.files.single;
+      final bytes = file.bytes;
+      String csvContent;
+      if (bytes != null) {
+        csvContent = utf8.decode(bytes, allowMalformed: true);
+      } else if (file.path != null) {
+        csvContent =
+            await File(file.path!).readAsString(encoding: utf8);
+      } else {
+        throw 'Could not read the selected CSV file';
+      }
+      csvContent = csvContent.replaceFirst('\ufeff', '');
+      if (csvContent.trim().isEmpty) throw 'Selected CSV is empty';
       await _processCsvContent(csvContent);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not select CSV: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _processCsvContent(String csvContent) async {
@@ -4473,7 +4590,29 @@ class _ProductsScreenState extends State<ProductsScreen> {
       List<List<dynamic>> csvTable =
           const CsvToListConverter().convert(csvContent);
       if (csvTable.isEmpty) throw 'CSV is empty';
-      final dataRows = csvTable.skip(1).toList();
+      final header = csvTable.first
+          .map((e) => e.toString().trim().toLowerCase())
+          .toList();
+      int column(String name, {int fallback = -1}) {
+        final index = header.indexWhere((value) =>
+            value == name ||
+            value.replaceAll(RegExp(r'[^a-z0-9]'), '') ==
+                name.replaceAll(RegExp(r'[^a-z0-9]'), ''));
+        return index >= 0 ? index : fallback;
+      }
+
+      final nameIndex = column('name', fallback: 0);
+      final descriptionIndex = column('description', fallback: 1);
+      final priceIndex = column('price', fallback: 2);
+      final costIndex = column('cost', fallback: 3);
+      final stockIndex = column('stock', fallback: 4);
+      final minStockIndex = column('min stock', fallback: 5);
+      final barcodeIndex = column('barcode', fallback: 6);
+      final categoryIndex = column('category', fallback: 7);
+      final skuIndex = column('sku', fallback: 8);
+      final dataRows = csvTable.skip(1).where((row) =>
+          row.isNotEmpty &&
+          row.any((value) => value?.toString().trim().isNotEmpty == true)).toList();
       if (dataRows.isEmpty) throw 'No data rows';
 
       int imported = 0, errors = 0;
@@ -4482,31 +4621,29 @@ class _ProductsScreenState extends State<ProductsScreen> {
       for (int i = 0; i < dataRows.length; i++) {
         try {
           final row = dataRows[i];
-          if (row.length < 3) throw 'Row ${i + 2}: Missing required columns';
-          final name = row[0]?.toString().trim();
-          if (name == null || name.isEmpty)
+          String valueAt(int index) =>
+              index >= 0 && index < row.length
+                  ? row[index]?.toString().trim() ?? ''
+                  : '';
+          final name = valueAt(nameIndex);
+          if (name.isEmpty)
             throw 'Row ${i + 2}: Name is required';
 
-          final barcodeValue =
-              row.length > 6 ? row[6]?.toString().trim() : null;
-          final skuValue = row.length > 8 ? row[8]?.toString().trim() : null;
+          final barcodeValue = valueAt(barcodeIndex);
+          final skuValue = valueAt(skuIndex);
+          final category = valueAt(categoryIndex);
+          if (category.isNotEmpty) await _db.addCategory(category);
 
           await _db.addProduct({
             'name': name,
-            'description': row.length > 1 ? row[1]?.toString().trim() : '',
-            'price': double.tryParse(row[2]?.toString() ?? '0') ?? 0,
-            'cost': row.length > 3
-                ? (double.tryParse(row[3]?.toString() ?? '0') ?? 0)
-                : 0,
-            'stock_quantity': double.tryParse(row[4]?.toString() ?? '0') ?? 0,
-            'min_stock_level': row.length > 5
-                ? (double.tryParse(row[5]?.toString() ?? '5') ?? 5)
-                : 5,
-            'barcode': (barcodeValue == null || barcodeValue.isEmpty)
-                ? null
-                : barcodeValue,
-            'category': row.length > 7 ? row[7]?.toString().trim() : '',
-            'sku': (skuValue == null || skuValue.isEmpty) ? null : skuValue,
+            'description': valueAt(descriptionIndex),
+            'price': double.tryParse(valueAt(priceIndex)) ?? 0,
+            'cost': double.tryParse(valueAt(costIndex)) ?? 0,
+            'stock_quantity': double.tryParse(valueAt(stockIndex)) ?? 0,
+            'min_stock_level': double.tryParse(valueAt(minStockIndex)) ?? 5,
+            'barcode': barcodeValue.isEmpty ? null : barcodeValue,
+            'category': category,
+            'sku': skuValue.isEmpty ? null : skuValue,
           });
           imported++;
         } catch (e) {

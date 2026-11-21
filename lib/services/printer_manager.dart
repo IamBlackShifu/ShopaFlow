@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'printer_service_interface.dart';
 import 'bluetooth_printer_service.dart';
 import 'sunmi_printer_service.dart';
@@ -26,6 +27,17 @@ class PrinterManager extends ChangeNotifier {
     
     // Default to Bluetooth
     _activePrinter = _bluetoothService;
+    _restorePrinterSelection();
+  }
+
+  Future<void> _restorePrinterSelection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final selected = prefs.getString('printer_type');
+    if (selected == 'sunmi') {
+      await switchPrinterType(PrinterType.sunmi);
+    } else {
+      await switchPrinterType(PrinterType.bluetooth);
+    }
   }
 
   void _onServiceUpdate() {
@@ -34,6 +46,11 @@ class PrinterManager extends ChangeNotifier {
 
   /// Switch between printer types
   Future<void> switchPrinterType(PrinterType type) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'printer_type',
+      type == PrinterType.sunmi ? 'sunmi' : 'bluetooth',
+    );
     if (_selectedType == type) return;
 
     _selectedType = type;

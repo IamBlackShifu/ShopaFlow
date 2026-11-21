@@ -1336,6 +1336,49 @@ class DatabaseService {
 
   Future<int> markSyncQueueItemSynced(String queueId) async {
     final db = await database;
+    final queueRows = await db.query(
+      'sync_queue',
+      columns: ['entity_type', 'entity_id', 'local_id', 'operation'],
+      where: 'id = ?',
+      whereArgs: [queueId],
+      limit: 1,
+    );
+    if (queueRows.isNotEmpty) {
+      final queue = queueRows.first;
+      final tableByType = <String, String>{
+        'product': 'products',
+        'customer': 'customers',
+        'sale': 'sales',
+        'sale_item': 'sale_items',
+        'category': 'categories',
+        'inventory_movement': 'inventory_movements',
+        'company': 'companies',
+        'store': 'stores',
+        'register': 'registers',
+        'app_user': 'app_users',
+      };
+      final table = tableByType[queue['entity_type']?.toString()];
+      if (table != null) {
+        if (table == 'companies' ||
+            table == 'stores' ||
+            table == 'registers' ||
+            table == 'app_users') {
+          await db.update(
+            table,
+            {'sync_status': _synced, 'updated_at': DateTime.now().toIso8601String()},
+            where: 'id = ?',
+            whereArgs: [queue['entity_id']],
+          );
+        } else {
+          await db.update(
+            table,
+            {'sync_status': _synced},
+            where: 'sync_id = ?',
+            whereArgs: [queue['entity_id']],
+          );
+        }
+      }
+    }
     return await db.update(
       'sync_queue',
       {'status': _synced, 'updated_at': DateTime.now().toIso8601String()},
