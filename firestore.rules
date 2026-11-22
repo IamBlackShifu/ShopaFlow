@@ -240,6 +240,14 @@ service cloud.firestore {
           && request.resource.data.company_id == resource.data.company_id;
         allow delete: if companyIsActive(companyId) && isOwnerOrAdmin(companyId);
       }
+      match /sale_actions/{actionId} {
+        allow read: if isCompanyUser(companyId);
+        allow create: if canSell(companyId)
+          && validScopedCreate(companyId)
+          && request.resource.data.action in ['negative_sale', 'cancelled']
+          && request.resource.data.performed_by is string;
+        allow update, delete: if false;
+      }
     }
 
     match /{path=**}/users/{userId} {

@@ -36,6 +36,29 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
     await connectToPrinter(_connectedPrinter!);
   }
 
+  Future<bool> ensureConnected() async {
+    if (_isConnected) {
+      await checkConnectionStatus();
+      if (_isConnected) return true;
+    }
+
+    if (_connectedPrinter == null) {
+      final prefs = await SharedPreferences.getInstance();
+      final mac = prefs.getString('bluetooth_printer_mac');
+      final name = prefs.getString('bluetooth_printer_name');
+      if (mac != null && mac.isNotEmpty) {
+        _connectedPrinter = BluetoothInfo(
+          name: name ?? 'Saved printer',
+          macAdress: mac,
+        );
+      }
+    }
+
+    if (_connectedPrinter == null) return false;
+    if (!await checkAvailability()) return false;
+    return await connectToPrinter(_connectedPrinter!);
+  }
+
   List<BluetoothInfo> get availablePrinters => _availablePrinters;
   BluetoothInfo? get connectedPrinter => _connectedPrinter;
   
@@ -164,8 +187,8 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
   // Print test receipt
   @override
   Future<bool> printTestReceipt({String? storeName}) async {
-    if (!_isConnected) {
-      _connectionStatus = 'Please connect to a printer first';
+    if (!await ensureConnected()) {
+      _connectionStatus = 'Printer unavailable. Please connect in Printer Settings';
       notifyListeners();
       return false;
     }
@@ -251,8 +274,8 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
     String? storeName,
     String? storeAddress,
   }) async {
-    if (!_isConnected) {
-      _connectionStatus = 'Please connect to a printer first';
+    if (!await ensureConnected()) {
+      _connectionStatus = 'Printer unavailable. Please connect in Printer Settings';
       notifyListeners();
       return false;
     }
@@ -347,7 +370,10 @@ class BluetoothPrinterService extends ChangeNotifier implements PrinterServiceIn
       final bool status = await PrintBluetoothThermal.connectionStatus;
       _isConnected = status;
       if (!status) {
-        _connectedPrinter = null;
+        _connectionStatus = 'Reconnecting saved printer...';
+        notifyListeners();
+        await ensureConnected();
+        if (_isConnected) return;
         _connectionStatus = 'Not connected';
       }
       notifyListeners();

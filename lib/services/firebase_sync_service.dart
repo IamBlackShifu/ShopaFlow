@@ -162,6 +162,7 @@ class FirebaseSyncService {
         'sale_items': 'sale_items',
         'customers': 'customers',
         'inventory_movements': 'inventory_movements',
+        'sale_actions': 'sale_actions',
       }.entries) {
         final snapshot = await companyRef
             .collection(entry.key)
@@ -280,6 +281,8 @@ class FirebaseSyncService {
         return 'customers';
       case 'inventory_movement':
         return 'inventory_movements';
+      case 'sale_action':
+        return 'sale_actions';
       default:
         return entityType;
     }

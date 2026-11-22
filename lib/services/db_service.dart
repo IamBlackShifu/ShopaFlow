@@ -28,7 +28,7 @@ class InsufficientStockException implements Exception {
 
 class DatabaseService {
   static Database? _database;
-  static const int _dbVersion = 4;
+  static const int _dbVersion = 6;
   static const String defaultCompanyId = 'local-company';
   static const String defaultStoreId = 'local-store';
   static const String defaultRegisterId = 'local-register';
@@ -237,15 +237,74 @@ class DatabaseService {
     if (oldVersion < 4) {
       await _createSaasTables(db);
     }
+    if (oldVersion < 5) {
+      await _createAuditTables(db);
+      await _addSaleAuditColumns(db);
+      await _addSaleActionColumns(db);
+    }
+    if (oldVersion < 6) {
+      await _createAuditTables(db);
+      await _addSaleAuditColumns(db);
+      await _addSaleActionColumns(db);
+    }
   }
 
   Future<void> _onOpen(Database db) async {
     await _createSaasTables(db);
     await _addColumnIfMissing(db, 'companies', 'owner_user_id', 'TEXT');
+    await _addColumnIfMissing(
+        db, 'companies', 'operating_status', "TEXT NOT NULL DEFAULT 'paused'");
+    await _addColumnIfMissing(
+        db, 'companies', 'suspension_reason', 'TEXT');
     await _addColumnIfMissing(db, 'app_users', 'store_id', 'TEXT');
     await _addColumnIfMissing(db, 'app_users', 'register_id', 'TEXT');
     await _ensureDefaultTenant(db);
     await _backfillSyncMetadata(db);
+    await _createAuditTables(db);
+    await _addSaleAuditColumns(db);
+  }
+
+  Future<void> _createAuditTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sale_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sync_id TEXT UNIQUE NOT NULL,
+        company_id TEXT NOT NULL,
+        store_id TEXT NOT NULL,
+        sale_id INTEGER NOT NULL,
+        sale_sync_id TEXT,
+        action TEXT NOT NULL,
+        reason TEXT,
+        performed_by TEXT,
+        approved_by TEXT,
+        approval_reason TEXT,
+        created_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'pending',
+        version INTEGER NOT NULL DEFAULT 1
+      )
+    ''');
+  }
+
+  Future<void> _addSaleAuditColumns(DatabaseExecutor db) async {
+    await _addColumnIfMissing(db, 'sales', 'sale_status',
+        "TEXT NOT NULL DEFAULT 'completed'");
+    await _addColumnIfMissing(db, 'sales', 'sold_by', 'TEXT');
+    await _addColumnIfMissing(db, 'sales', 'approved_by', 'TEXT');
+    await _addColumnIfMissing(db, 'sales', 'approval_reason', 'TEXT');
+    await _addColumnIfMissing(db, 'sales', 'cancelled_at', 'TEXT');
+    await _addColumnIfMissing(db, 'sales', 'cancelled_by', 'TEXT');
+    await _addColumnIfMissing(db, 'sales', 'cancellation_reason', 'TEXT');
+  }
+
+  Future<void> _addSaleActionColumns(DatabaseExecutor db) async {
+    await _addColumnIfMissing(
+        db, 'sale_actions', 'performed_by', 'TEXT');
+    await _addColumnIfMissing(db, 'sale_actions', 'approved_by', 'TEXT');
+    await _addColumnIfMissing(
+        db, 'sale_actions', 'approval_reason', 'TEXT');
+    await _addColumnIfMissing(
+        db, 'sale_actions', 'action_status',
+        "TEXT NOT NULL DEFAULT 'approved'");
   }
 
   Future<void> _createSaasTables(DatabaseExecutor db) async {
@@ -272,6 +331,8 @@ class DatabaseService {
         owner_user_id TEXT,
         plan TEXT NOT NULL DEFAULT 'starter',
         subscription_status TEXT NOT NULL DEFAULT 'pending',
+        operating_status TEXT NOT NULL DEFAULT 'paused',
+        suspension_reason TEXT,
         created_at TEXT,
         updated_at TEXT,
         sync_status TEXT NOT NULL DEFAULT '$_pendingSync'
@@ -452,6 +513,8 @@ class DatabaseService {
           'name': 'Local Company',
           'plan': 'starter',
           'subscription_status': 'pending',
+          'operating_status': 'paused',
+          'suspension_reason': 'Awaiting subscription activation',
           'created_at': now,
           'updated_at': now,
           'sync_status': _pendingSync,
@@ -580,6 +643,29 @@ class DatabaseService {
         userId: cleanUserId,
       );
 
+      final existingCompany = await txn.query(
+        'companies',
+        columns: [
+          'subscription_status',
+          'operating_status',
+          'suspension_reason',
+        ],
+        where: 'id = ?',
+        whereArgs: [cleanCompanyId],
+        limit: 1,
+      );
+      final existingSubscriptionStatus = existingCompany.isEmpty
+          ? 'pending'
+          : (existingCompany.first['subscription_status']?.toString() ??
+              'pending');
+      final existingOperatingStatus = existingCompany.isEmpty
+          ? 'paused'
+          : (existingCompany.first['operating_status']?.toString() ??
+              'paused');
+      final existingSuspensionReason = existingCompany.isEmpty
+          ? 'Awaiting subscription activation'
+          : (existingCompany.first['suspension_reason']?.toString() ?? '');
+
       await txn.insert(
           'companies',
           {
@@ -587,7 +673,9 @@ class DatabaseService {
             'name': cleanCompanyName,
             'owner_user_id': cleanUserId,
             'plan': 'starter',
-            'subscription_status': 'pending',
+            'subscription_status': existingSubscriptionStatus,
+            'operating_status': existingOperatingStatus,
+            'suspension_reason': existingSuspensionReason,
             'created_at': now,
             'updated_at': now,
             'sync_status': _pendingSync,
@@ -630,9 +718,9 @@ class DatabaseService {
         'name': cleanCompanyName,
         'owner_user_id': cleanUserId,
         'plan': 'starter',
-        'subscription_status': 'pending',
-        'operating_status': 'paused',
-        'suspension_reason': 'Awaiting subscription activation',
+        'subscription_status': existingSubscriptionStatus,
+        'operating_status': existingOperatingStatus,
+        'suspension_reason': existingSuspensionReason,
         'updated_at': now,
         'sync_status': _pendingSync,
       });
@@ -689,6 +777,10 @@ class DatabaseService {
             'plan': (company['plan'] ?? 'starter').toString(),
             'subscription_status':
                 (company['subscription_status'] ?? 'pending').toString(),
+            'operating_status':
+                (company['operating_status'] ?? 'paused').toString(),
+            'suspension_reason':
+                (company['suspension_reason'] ?? '').toString(),
             'created_at': (company['created_at'] ?? now).toString(),
             'updated_at': (company['updated_at'] ?? now).toString(),
             'sync_status': _synced,
@@ -854,6 +946,17 @@ class DatabaseService {
   }
 
   // Product methods
+  Future<Map<String, dynamic>?> getStoreProfile() async {
+    final db = await database;
+    final rows = await db.query(
+      'stores',
+      where: 'id = ? AND company_id = ?',
+      whereArgs: [_storeId, _companyId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
   Future<List<String>> getAllCategories() async {
     final db = await database;
     final saved = await db.query('categories',
@@ -1009,6 +1112,26 @@ class DatabaseService {
       Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
+    final receiptNumber = sale['receipt_number']?.toString();
+    if (receiptNumber == null || receiptNumber.isEmpty) {
+      throw ArgumentError('A receipt number is required.');
+    }
+    final existingReceipt = await db.query(
+      'sales',
+      columns: ['id'],
+      where:
+          'receipt_number = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL',
+      whereArgs: [receiptNumber, _companyId, _storeId],
+      limit: 1,
+    );
+    if (existingReceipt.isNotEmpty) {
+      throw StateError('This receipt has already been recorded.');
+    }
+    final totalAmount =
+        (sale['total_amount'] as num?)?.toDouble() ?? 0.0;
+    if (!totalAmount.isFinite) {
+      throw ArgumentError('Sale total must be a finite number.');
+    }
     sale['sync_id'] ??= _newSyncId('sale');
     sale['company_id'] = _companyId;
     sale['store_id'] = _storeId;
@@ -1017,6 +1140,8 @@ class DatabaseService {
     sale['created_at'] = now;
     sale['sync_status'] = _pendingSync;
     sale['version'] ??= 1;
+    sale['sale_status'] ??= 'completed';
+    sale['sold_by'] ??= _userId;
 
     return await db.transaction((txn) async {
       final saleId = await txn.insert('sales', sale);
@@ -1071,7 +1196,10 @@ class DatabaseService {
 
         final available =
             (productRow['stock_quantity'] as num?)?.toDouble() ?? 0.0;
-        if (available + 0.000001 < quantity) {
+        final allowNegative =
+            sale['allow_negative_sale'] == true ||
+            sale['sale_type'] == 'negative';
+        if (!allowNegative && available + 0.000001 < quantity) {
           throw InsufficientStockException(
             productId: productId,
             productName: productRow['name']?.toString(),
@@ -1088,9 +1216,11 @@ class DatabaseService {
             AND company_id = ?
             AND store_id = ?
             AND deleted_at IS NULL
-            AND stock_quantity + 0.000001 >= ?
+            ${allowNegative ? '' : 'AND stock_quantity + 0.000001 >= ?'}
           ''',
-          [quantity, productId, _companyId, _storeId, quantity],
+          allowNegative
+             ? [quantity, productId, _companyId, _storeId]
+             : [quantity, productId, _companyId, _storeId, quantity],
         );
         if (stockUpdated != 1) {
           throw InsufficientStockException(
@@ -1130,6 +1260,34 @@ class DatabaseService {
         );
       }
 
+      if (sale['sale_type'] == 'negative') {
+        final actionSyncId = _newSyncId('action');
+        final action = {
+          'sync_id': actionSyncId,
+          'company_id': _companyId,
+          'store_id': _storeId,
+          'sale_id': saleId,
+          'sale_sync_id': sale['sync_id'],
+          'action': 'negative_sale',
+          'reason': sale['approval_reason'] ?? 'Negative stock sale',
+          'performed_by': sale['sold_by'] ?? _userId,
+          'approved_by': sale['approved_by'] ?? '',
+          'approval_reason': sale['approval_reason'] ?? '',
+          'action_status': 'approved',
+          'created_at': now,
+          'sync_status': _pendingSync,
+          'version': 1,
+        };
+        await txn.insert('sale_actions', action);
+        await _enqueueSyncChange(
+          txn,
+          'sale_action',
+          actionSyncId,
+          'create',
+          action,
+        );
+      }
+
       return saleId;
     });
   }
@@ -1142,6 +1300,153 @@ class DatabaseService {
       whereArgs: [_companyId, _storeId],
       orderBy: 'sale_date DESC',
     );
+  }
+
+  Future<void> cancelSale({
+    required int saleId,
+    required String reason,
+    required String approvedBy,
+  }) async {
+    if (reason.trim().isEmpty) {
+      throw ArgumentError('A cancellation reason is required.');
+    }
+    if (approvedBy.trim().isEmpty) {
+      throw ArgumentError('Approver information is required.');
+    }
+
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    await db.transaction((txn) async {
+      final sales = await txn.query(
+        'sales',
+        where:
+            'id = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL',
+        whereArgs: [saleId, _companyId, _storeId],
+        limit: 1,
+      );
+      if (sales.isEmpty) {
+        throw StateError('Sale not found.');
+      }
+      final sale = sales.first;
+      if (sale['sale_status'] == 'cancelled') {
+        throw StateError('This receipt has already been cancelled.');
+      }
+
+      await txn.update(
+        'sales',
+        {
+          'sale_status': 'cancelled',
+          'cancelled_at': now,
+          'cancelled_by': approvedBy.trim(),
+          'cancellation_reason': reason.trim(),
+          'approved_by': approvedBy.trim(),
+          'approval_reason': reason.trim(),
+          'action_status': 'approved',
+          'sync_status': _pendingSync,
+          'version': ((sale['version'] as num?)?.toInt() ?? 1) + 1,
+        },
+        where: 'id = ?',
+        whereArgs: [saleId],
+      );
+
+      final saleRow = await txn.query('sales',
+          where: 'id = ?', whereArgs: [saleId], limit: 1);
+      await _enqueueSyncChange(
+        txn,
+        'sale',
+        sale['sync_id'].toString(),
+        'update',
+        saleRow.first,
+        localId: saleId,
+      );
+
+      final items = await txn.query(
+        'sale_items',
+        where: 'sale_id = ? AND company_id = ? AND store_id = ?',
+        whereArgs: [saleId, _companyId, _storeId],
+      );
+      for (final item in items) {
+        final quantity =
+            (item['quantity'] as num?)?.toDouble() ?? 0.0;
+        final productId = item['product_id'];
+        if (quantity <= 0 || productId == null) continue;
+
+        await txn.rawUpdate(
+          '''
+          UPDATE products
+          SET stock_quantity = stock_quantity + ?, sync_status = ?, updated_at = ?
+          WHERE id = ? AND company_id = ? AND store_id = ? AND deleted_at IS NULL
+          ''',
+          [
+            quantity,
+            _pendingSync,
+            now,
+            productId,
+            _companyId,
+            _storeId,
+          ],
+        );
+
+        final productRows = await txn.query(
+          'products',
+          columns: ['sync_id'],
+          where: 'id = ?',
+          whereArgs: [productId],
+          limit: 1,
+        );
+        final movement = {
+          'sync_id': _newSyncId('mov'),
+          'company_id': _companyId,
+          'store_id': _storeId,
+          'product_id': productId,
+          'product_sync_id': productRows.isEmpty
+              ? null
+              : productRows.first['sync_id'],
+          'sale_id': saleId,
+          'sale_sync_id': sale['sync_id'],
+          'movement_type': 'return',
+          'quantity_delta': quantity,
+          'reason': 'Cancelled receipt ${sale['receipt_number']}: ${reason.trim()}',
+          'created_at': now,
+          'created_by': approvedBy.trim(),
+          'sync_status': _pendingSync,
+          'version': 1,
+        };
+        await txn.insert('inventory_movements', movement);
+        await _enqueueSyncChange(
+          txn,
+          'inventory_movement',
+          movement['sync_id'].toString(),
+          'create',
+          movement,
+        );
+      }
+
+      final actionSyncId = _newSyncId('action');
+      final action = {
+        'sync_id': actionSyncId,
+        'company_id': _companyId,
+        'store_id': _storeId,
+        'sale_id': saleId,
+        'sale_sync_id': sale['sync_id'],
+        'action': 'cancelled',
+        'reason': reason.trim(),
+        'performed_by': _userId,
+        'approved_by': approvedBy.trim(),
+        'approval_reason': reason.trim(),
+        'created_at': now,
+        'sync_status': _pendingSync,
+        'version': 1,
+      };
+      await txn.insert('sale_actions', action);
+      await _enqueueSyncChange(
+        txn,
+        'sale_action',
+        actionSyncId,
+        'create',
+        action,
+      );
+    });
   }
 
   Future<List<Map<String, dynamic>>> getSalesByDate(DateTime date) async {
@@ -1172,6 +1477,27 @@ class DatabaseService {
         AND si.deleted_at IS NULL
       ORDER BY si.id ASC
     ''', [saleId, _companyId, _storeId]);
+  }
+
+  Future<List<Map<String, dynamic>>> getSaleActions(int saleId) async {
+    final db = await database;
+    return await db.query(
+      'sale_actions',
+      where:
+          'sale_id = ? AND company_id = ? AND store_id = ?',
+      whereArgs: [saleId, _companyId, _storeId],
+      orderBy: 'created_at DESC',
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> getAllSaleActions() async {
+    final db = await database;
+    return await db.query(
+      'sale_actions',
+      where: 'company_id = ? AND store_id = ?',
+      whereArgs: [_companyId, _storeId],
+      orderBy: 'created_at DESC',
+    );
   }
 
   Future<Map<String, dynamic>> getDailySalesSummary(DateTime date) async {
@@ -1352,6 +1678,7 @@ class DatabaseService {
         'sale_item': 'sale_items',
         'category': 'categories',
         'inventory_movement': 'inventory_movements',
+        'sale_action': 'sale_actions',
         'company': 'companies',
         'store': 'stores',
         'register': 'registers',
@@ -1408,6 +1735,7 @@ class DatabaseService {
       'customers',
       'inventory_movements',
       'categories',
+      'sale_actions',
     };
     if (!allowedTables.contains(table)) {
       throw ArgumentError('Unsupported sync table: $table');
@@ -1430,15 +1758,28 @@ class DatabaseService {
           row['store_id'] = row['store_id'] ?? _storeId;
 
         final existing = await txn.query(table,
-            columns: ['id'],
+            columns: ['id', 'version', 'sync_status'],
             where: 'sync_id = ?',
             whereArgs: [syncId],
             limit: 1);
         if (existing.isEmpty) {
           await txn.insert(table, row);
         } else {
-          await txn
-              .update(table, row, where: 'sync_id = ?', whereArgs: [syncId]);
+          final local = existing.first;
+          final localVersion =
+              (local['version'] as num?)?.toInt() ?? 1;
+          final remoteVersion =
+              (row['version'] as num?)?.toInt() ?? 1;
+          final localPending = local['sync_status'] == _pendingSync ||
+              local['sync_status'] == 'failed';
+          if (!localPending || remoteVersion > localVersion) {
+            await txn.update(
+              table,
+              row,
+              where: 'sync_id = ?',
+              whereArgs: [syncId],
+            );
+          }
         }
       }
     });
@@ -1463,6 +1804,9 @@ class DatabaseService {
     final inventoryMovements = await db.query('inventory_movements',
         where: 'company_id = ? AND store_id = ?',
         whereArgs: [_companyId, _storeId]);
+    final saleActions = await db.query('sale_actions',
+        where: 'company_id = ? AND store_id = ?',
+        whereArgs: [_companyId, _storeId]);
 
     return {
       'company_id': _companyId,
@@ -1472,6 +1816,7 @@ class DatabaseService {
       'sale_items': saleItems,
       'customers': customers,
       'inventory_movements': inventoryMovements,
+      'sale_actions': saleActions,
       'exported_at': DateTime.now().toIso8601String(),
     };
   }

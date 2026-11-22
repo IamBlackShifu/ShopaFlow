@@ -12,6 +12,7 @@ import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'firebase_options.dart';
 import 'services/db_service.dart';
@@ -640,6 +641,12 @@ Future<void> main() async {
   } catch (_) {
     // Firebase is optional until the project is configured with FlutterFire.
   }
+  if (Firebase.apps.isNotEmpty) {
+    await FirebaseCrashlytics.instance
+        .setCrashlyticsCollectionEnabled(true);
+    FlutterError.onError =
+        FirebaseCrashlytics.instance.recordFlutterFatalError;
+  }
   runApp(const ShopaFlowApp());
 }
 
@@ -839,6 +846,15 @@ class _SplashScreenState extends State<SplashScreen>
         storeId: authSession.storeId,
         userId: authSession.userId,
       );
+      final remoteStore = await db.getStoreProfile();
+      if (remoteStore != null) {
+        if ((remoteStore['name']?.toString() ?? '').isNotEmpty) {
+          await storeInfo.updateName(remoteStore['name'].toString());
+        }
+        if ((remoteStore['address']?.toString() ?? '').isNotEmpty) {
+          await storeInfo.updateAddress(remoteStore['address'].toString());
+        }
+      }
     }
     await businessMode.load();
 
@@ -1065,6 +1081,19 @@ class _LoginFormState extends State<LoginForm> {
     }
     if (pullResult.configured && pullResult.message == null) {
       await context.read<SetupStatusModel>().markSetupCompleted();
+    }
+    final remoteStore = await db.getStoreProfile();
+    if (remoteStore != null) {
+      if ((remoteStore['name']?.toString() ?? '').isNotEmpty) {
+        await context
+            .read<StoreInfoModel>()
+            .updateName(remoteStore['name'].toString());
+      }
+      if ((remoteStore['address']?.toString() ?? '').isNotEmpty) {
+        await context
+            .read<StoreInfoModel>()
+            .updateAddress(remoteStore['address'].toString());
+      }
     }
     if (!mounted) return;
     widget.onSuccess();
@@ -1596,6 +1625,7 @@ class SetupWizardScreen extends StatefulWidget {
 class _SetupWizardScreenState extends State<SetupWizardScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
+  bool _completing = false;
 
   // Form controllers
   final _shopNameController = TextEditingController();
@@ -1645,41 +1675,60 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
   }
 
   Future<void> _completeSetup() async {
+    if (_completing) return;
+    if (_shopNameController.text.trim().isEmpty) {
+      _pageController.animateToPage(
+        1,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a shop name before completing setup.')),
+      );
+      return;
+    }
+    setState(() => _completing = true);
     final storeInfo = context.read<StoreInfoModel>();
     final exchangeRate = context.read<ExchangeRateModel>();
     final themeModel = context.read<ThemeModel>();
     final setupStatus = context.read<SetupStatusModel>();
 
-    // Save all settings
-    await storeInfo.updateName(_shopNameController.text);
-    await storeInfo.updateAddress(_addressController.text);
-    await exchangeRate
-        .update(double.tryParse(_exchangeRateController.text) ?? 320);
-    await themeModel.updateColor(_selectedColor);
-    final auth = context.read<AuthSessionModel>();
-    final db = context.read<DatabaseService>();
-    auth.configureDatabase(db);
-    await db.upsertLocalCompanyProfile(
-      companyId: auth.companyId,
-      storeId: auth.storeId,
-      companyName: auth.companyName.isEmpty
-          ? _shopNameController.text
-          : auth.companyName,
-      ownerName: auth.ownerName,
-      email: auth.email,
-      userId: auth.userId,
-      role: auth.role,
-      storeName: _shopNameController.text,
-      storeAddress: _addressController.text,
-    );
-    await setupStatus.markSetupCompleted();
+    try {
+      await storeInfo.updateName(_shopNameController.text);
+      await storeInfo.updateAddress(_addressController.text);
+      await exchangeRate
+          .update(double.tryParse(_exchangeRateController.text) ?? 320);
+      await themeModel.updateColor(_selectedColor);
+      final auth = context.read<AuthSessionModel>();
+      final db = context.read<DatabaseService>();
+      auth.configureDatabase(db);
+      await db.upsertLocalCompanyProfile(
+        companyId: auth.companyId,
+        storeId: auth.storeId,
+        companyName: auth.companyName.isEmpty
+            ? _shopNameController.text
+            : auth.companyName,
+        ownerName: auth.ownerName,
+        email: auth.email,
+        userId: auth.userId,
+        role: auth.role,
+        storeName: _shopNameController.text,
+        storeAddress: _addressController.text,
+      );
+      await setupStatus.markSetupCompleted();
 
-    // Navigate to main screen
-    if (mounted) {
+      if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const MainScreen()),
       );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not complete setup: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _completing = false);
     }
   }
 
@@ -1729,12 +1778,16 @@ class _SetupWizardScreenState extends State<SetupWizardScreen> {
                 else
                   const SizedBox.shrink(),
                 ElevatedButton(
-                  onPressed: _nextPage,
+                  onPressed: _completing ? null : _nextPage,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: _selectedColor,
                     foregroundColor: Colors.white,
                   ),
-                  child: Text(_currentPage < 2 ? 'Next' : 'Complete Setup'),
+                  child: Text(
+                    _completing
+                        ? 'Saving...'
+                        : (_currentPage < 2 ? 'Next' : 'Complete Setup'),
+                  ),
                 ),
               ],
             ),
@@ -2227,6 +2280,11 @@ class _MainScreenState extends State<MainScreen>
       await db.migrateLegacyTenantToActive();
       await FirebaseSyncService(databaseService: db)
           .syncPendingChanges(retryFailed: true);
+      await FirebaseSyncService(databaseService: db).pullCompanyData(
+        companyId: auth.companyId,
+        storeId: auth.storeId,
+        userId: auth.userId,
+      );
     } catch (_) {
       // Changes remain queued and will be retried by the periodic sync.
     } finally {
@@ -2313,10 +2371,10 @@ class _MainScreenState extends State<MainScreen>
       if (auth.canManageInventory)
         const _ShellNavItem(
             'Products', Icons.inventory_2_outlined, ProductsScreen()),
-      if (auth.canViewReports)
+      if (auth.canViewReports || auth.canSell)
         const _ShellNavItem(
             'Reports', Icons.analytics_outlined, ReportsScreen()),
-      if (auth.canManageSettings)
+      if (auth.canManageSettings || auth.canSell)
         const _ShellNavItem(
             'Settings', Icons.settings_outlined, SettingsScreen()),
     ];
@@ -2485,6 +2543,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool _loading = true;
   bool _showCart = true; // cart visibility
   List<Map<String, dynamic>> _products = [];
+  Map<String, String>? _negativeSaleApproval;
+  bool _checkoutInProgress = false;
   late DatabaseService db;
   bool _didScheduleInitialLoad = false;
 
@@ -2629,8 +2689,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     if (idx == -1) {
       if (stock <= 0) {
-        _snack('Out of stock');
-        return;
+        final auth = context.read<AuthSessionModel>();
+        if (!auth.canManageInventory) {
+          final approval = await _showNegativeSaleApproval();
+          if (approval == null) return;
+          _negativeSaleApproval = approval;
+        } else {
+          _negativeSaleApproval = {
+            'approved_by':
+                '${auth.ownerName.isEmpty ? auth.role : auth.ownerName} (${auth.userId})',
+            'approval_reason': 'Manager or owner authorised negative sale',
+          };
+        }
       }
       double qtyToAdd = _quantityStep;
       if (_isButchery) {
@@ -2706,10 +2776,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final item = newCart[index];
     final newQty = asDouble(item['qty']) + delta;
     final stock = asDouble(item['stock']);
-    if (newQty > stock + 0.000001) {
-      _snack('Max stock reached');
-      return;
-    }
     if (newQty <= 0.000001) {
       newCart.removeAt(index);
     } else {
@@ -2731,7 +2797,69 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         SnackBar(content: Text(m), duration: const Duration(seconds: 1)));
   }
 
+  Future<Map<String, String>?> _showNegativeSaleApproval() async {
+    final approverController = TextEditingController();
+    final reasonController = TextEditingController();
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Approval required'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'This sale will reduce stock below zero. An approved supervisor must sign off.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: approverController,
+              decoration: const InputDecoration(
+                labelText: 'Approver name or ID',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 2,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (approverController.text.trim().isEmpty ||
+                  reasonController.text.trim().isEmpty) return;
+              Navigator.pop(dialogContext, {
+                'approved_by': approverController.text.trim(),
+                'approval_reason': reasonController.text.trim(),
+              });
+            },
+            child: const Text('Approve sale'),
+          ),
+        ],
+      ),
+    );
+    approverController.dispose();
+    reasonController.dispose();
+    return result;
+  }
+
   Future<void> _checkout() async {
+    if (_checkoutInProgress) {
+      _snack('Checkout is already in progress.');
+      return;
+    }
+    _checkoutInProgress = true;
     if (!context.read<AuthSessionModel>().canSell) {
       _snack('You do not have permission to sell.');
       return;
@@ -2741,14 +2869,45 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
     final currentTotal = totalUSD;
+    final auth = context.read<AuthSessionModel>();
+    final negativeItems = _cartNotifier.value.where((cartItem) {
+      final stock = asDouble(cartItem['stock']);
+      final qty = asDouble(cartItem['qty']);
+      return qty > stock + 0.000001;
+    }).toList();
+    Map<String, String>? negativeApproval = _negativeSaleApproval;
+    if (negativeItems.isNotEmpty && negativeApproval == null) {
+      if (auth.canManageInventory) {
+        negativeApproval = {
+          'approved_by':
+              '${auth.ownerName.isEmpty ? auth.role : auth.ownerName} (${auth.userId})',
+          'approval_reason': 'Manager or owner authorised negative sale',
+        };
+      } else {
+        negativeApproval = await _showNegativeSaleApproval();
+        if (negativeApproval == null) {
+          _checkoutInProgress = false;
+          return;
+        }
+      }
+    }
     final method = await showDialog<String>(
         context: context, builder: (_) => _PaymentDialog(total: currentTotal));
-    if (method == null) return;
+    if (method == null) {
+      _checkoutInProgress = false;
+      return;
+    }
     final sale = {
       'total_amount': currentTotal,
       'payment_method': method,
       'sale_date': DateTime.now().toIso8601String(),
-      'receipt_number': 'RCP${DateTime.now().millisecondsSinceEpoch}'
+      'receipt_number': 'RCP${DateTime.now().millisecondsSinceEpoch}',
+      'sold_by': auth.userId,
+      'sale_type': negativeItems.isNotEmpty ? 'negative' : 'completed',
+      'allow_negative_sale': negativeItems.isNotEmpty,
+      if (negativeApproval != null) 'approved_by': negativeApproval['approved_by'],
+      if (negativeApproval != null)
+        'approval_reason': negativeApproval['approval_reason'],
     };
     final items = _cartNotifier.value
         .map((c) => ({
@@ -2773,11 +2932,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     try {
       await db.addSale(sale, items);
     } on InsufficientStockException catch (error) {
+      _checkoutInProgress = false;
       _snack(error.toString());
       await _load();
       if (mounted) setState(() => _showCart = true);
       return;
     } on StateError catch (error) {
+      _checkoutInProgress = false;
       _snack(error.message);
       await _load();
       if (mounted) setState(() => _showCart = true);
@@ -2793,6 +2954,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
     }
     _cartNotifier.value = [];
+    _negativeSaleApproval = null;
+    _checkoutInProgress = false;
     setState(() {
       query = '';
       _searchReset++;
@@ -3598,11 +3761,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _saveStore() async {
     final store = context.read<StoreInfoModel>();
+    final auth = context.read<AuthSessionModel>();
+    final db = context.read<DatabaseService>();
+    auth.configureDatabase(db);
     await store.updateName(_nameCtrl.text);
     await store.updateAddress(_addrCtrl.text);
+    await db.upsertLocalCompanyProfile(
+      companyId: auth.companyId,
+      storeId: auth.storeId,
+      companyName: auth.companyName.isEmpty
+          ? _nameCtrl.text
+          : auth.companyName,
+      ownerName: auth.ownerName,
+      email: auth.email,
+      userId: auth.userId,
+      role: auth.role,
+      storeName: _nameCtrl.text,
+      storeAddress: _addrCtrl.text,
+    );
+    await FirebaseSyncService(databaseService: db)
+        .syncPendingChanges(retryFailed: true);
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Store info saved')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Store name and address saved')),
+    );
   }
 
   Future<void> _saveRate() async {
@@ -3692,9 +3874,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (!context.watch<AuthSessionModel>().canManageSettings) {
+    final auth = context.watch<AuthSessionModel>();
+    final printerOnly = !auth.canManageSettings;
+    if (!auth.canManageSettings && !auth.canSell) {
       return const Center(
-          child: Text('You do not have permission to manage settings.'));
+          child: Text('You do not have permission to access settings.'));
+    }
+    if (printerOnly) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Settings',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            _section('Printer Settings', [
+              ElevatedButton.icon(
+                icon: const Icon(Icons.print),
+                label: const Text('Configure Printer'),
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                        builder: (_) => const PrinterSettingsPage()),
+                  );
+                },
+              ),
+            ]),
+          ],
+        ),
+      );
     }
     final businessMode = context.watch<BusinessModeModel>();
     return SingleChildScrollView(
@@ -4249,10 +4458,15 @@ class _ProductsScreenState extends State<ProductsScreen> {
   List<String> _categories = ['All'];
   late DatabaseService _db;
   bool _didScheduleInitialLoad = false;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _pullAndReloadProducts(),
+    );
   }
 
   @override
@@ -4268,8 +4482,25 @@ class _ProductsScreenState extends State<ProductsScreen> {
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _pullAndReloadProducts() async {
+    if (!mounted) return;
+    try {
+      final auth = context.read<AuthSessionModel>();
+      auth.configureDatabase(_db);
+      await FirebaseSyncService(databaseService: _db).pullCompanyData(
+        companyId: auth.companyId,
+        storeId: auth.storeId,
+        userId: auth.userId,
+      );
+      await _loadProducts();
+    } catch (_) {
+      // Keep showing the last known local inventory while offline.
+    }
   }
 
   Future<void> _loadProducts() async {
@@ -4841,6 +5072,7 @@ class _ReportsScreenState extends State<ReportsScreen>
       Map<String, int> paymentMethods = {};
 
       for (final sale in sales) {
+        if (sale['sale_status'] == 'cancelled') continue;
         final saleDate = DateTime.parse(sale['sale_date']);
         final amount = (sale['total_amount'] as num).toDouble();
         totalSales += amount;
@@ -4908,6 +5140,114 @@ class _ReportsScreenState extends State<ReportsScreen>
     }
   }
 
+  Future<void> _reprintSale(Map<String, dynamic> sale, List<Map<String, dynamic>> items) async {
+    try {
+      final printer = context.read<PrinterManager>();
+      final store = context.read<StoreInfoModel>();
+      final printItems = items.map((item) => ({
+            'name': item['product_name']?.toString() ?? 'Item',
+            'quantity': item['quantity'],
+            'total_price': item['total_price'],
+          })).toList();
+      await printer.printReceipt(
+        receiptNumber: sale['receipt_number']?.toString() ??
+            'Sale #${sale['id']}',
+        saleDate: DateTime.parse(sale['sale_date']),
+        items: printItems,
+        total: (sale['total_amount'] as num).toDouble(),
+        paymentMethod: sale['payment_method']?.toString() ?? 'Unknown',
+        storeName: store.name,
+        storeAddress: store.address,
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to reprint the receipt.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _cancelSale(Map<String, dynamic> sale) async {
+    final reasonController = TextEditingController();
+    final approvedByController = TextEditingController();
+    final approved = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cancel receipt / return goods'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'This will restock the sold items and mark the receipt cancelled.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: approvedByController,
+              decoration: const InputDecoration(
+                labelText: 'Approver name or ID',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              decoration: const InputDecoration(
+                labelText: 'Return / cancellation reason',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 2,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Back'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (approvedByController.text.trim().isEmpty ||
+                  reasonController.text.trim().isEmpty) return;
+              Navigator.pop(dialogContext, true);
+            },
+            child: const Text('Approve cancellation'),
+          ),
+        ],
+      ),
+    );
+    if (approved != true) {
+      reasonController.dispose();
+      approvedByController.dispose();
+      return;
+    }
+    try {
+      await context.read<DatabaseService>().cancelSale(
+            saleId: sale['id'] as int,
+            reason: reasonController.text,
+            approvedBy: approvedByController.text,
+          );
+      await FirebaseSyncService(databaseService: context.read<DatabaseService>())
+          .syncPendingChanges(retryFailed: true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Receipt cancelled and stock restored.')),
+        );
+        await _loadReportsData();
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to cancel receipt: $error')),
+        );
+      }
+    } finally {
+      reasonController.dispose();
+      approvedByController.dispose();
+    }
+  }
+
   Future<void> _exportSales() async {
     final db = context.read<DatabaseService>();
     final sales = await db.getAllSales();
@@ -4941,6 +5281,7 @@ class _ReportsScreenState extends State<ReportsScreen>
   Future<void> _showSaleDetails(Map<String, dynamic> sale) async {
     final db = context.read<DatabaseService>();
     final items = await db.getSaleItems(sale['id']);
+    final actions = await db.getSaleActions(sale['id']);
 
     if (mounted) {
       showDialog(
@@ -4949,23 +5290,63 @@ class _ReportsScreenState extends State<ReportsScreen>
           title: Text('Sale #${sale['id']} Details'),
           content: SizedBox(
             width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final isButchery = context.read<BusinessModeModel>().isButchery;
-                return ListTile(
-                  title: Text(item['product_name']?.toString() ?? 'Unknown'),
-                  subtitle: Text(
-                      'Qty: ${formatQuantityDisplay(asDouble(item['quantity']), isWeight: isButchery)} @ \$${asDouble(item['unit_price']).toStringAsFixed(2)}'),
-                  trailing: Text(
-                      '\$${(item['total_price'] as num).toStringAsFixed(2)}'),
-                );
-              },
+            height: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ...items.map((item) {
+                    final isButchery =
+                        context.read<BusinessModeModel>().isButchery;
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(item['product_name']?.toString() ?? 'Unknown'),
+                      subtitle: Text(
+                          'Qty: ${formatQuantityDisplay(asDouble(item['quantity']), isWeight: isButchery)} @ \$${asDouble(item['unit_price']).toStringAsFixed(2)}'),
+                      trailing: Text(
+                          '\$${(item['total_price'] as num).toStringAsFixed(2)}'),
+                    );
+                  }),
+                  if (actions.isNotEmpty) ...[
+                    const Divider(),
+                    const Text(
+                      'Audit trail',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    ...actions.map((action) => ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.history),
+                          title: Text(action['action']?.toString() ?? 'Action'),
+                          subtitle: Text(
+                            'By ${action['performed_by']?.toString() ?? 'Unknown'}'
+                            '${(action['approved_by']?.toString() ?? '').isEmpty ? '' : '\nApproved by ${action['approved_by']}'}'
+                            '\n${action['reason']?.toString() ?? ''}',
+                          ),
+                        )),
+                  ],
+                ],
+              ),
             ),
           ),
           actions: [
+            TextButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                _reprintSale(sale, items);
+              },
+              icon: const Icon(Icons.print),
+              label: const Text('Reprint'),
+            ),
+            if (context.read<AuthSessionModel>().canSell &&
+                sale['sale_status'] != 'cancelled')
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _cancelSale(sale);
+                },
+                icon: const Icon(Icons.undo),
+                label: const Text('Cancel / Return'),
+              ),
             TextButton(
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Close'))
@@ -4977,7 +5358,8 @@ class _ReportsScreenState extends State<ReportsScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (!context.watch<AuthSessionModel>().canViewReports) {
+    final auth = context.watch<AuthSessionModel>();
+    if (!auth.canViewReports && !auth.canSell) {
       return const Center(
           child: Text('You do not have permission to view reports.'));
     }

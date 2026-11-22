@@ -33,8 +33,8 @@ android {
         applicationId = "com.shopaflow.pos"
         minSdk = flutter.minSdkVersion
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 9
+        versionName = "1.0.8"
         
         multiDexEnabled = true
     }

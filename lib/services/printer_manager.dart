@@ -87,6 +87,17 @@ class PrinterManager extends ChangeNotifier {
     return await _activePrinter!.connect();
   }
 
+  Future<bool> ensureConnected() async {
+    if (_activePrinter == null) return false;
+    if (_activePrinter is BluetoothPrinterService) {
+      return await (_activePrinter as BluetoothPrinterService).ensureConnected();
+    }
+    if (_activePrinter is SunmiPrinterService) {
+      return await (_activePrinter as SunmiPrinterService).checkAvailability();
+    }
+    return await _activePrinter!.checkAvailability();
+  }
+
   /// Disconnect from printer
   Future<void> disconnect() async {
     if (_activePrinter == null) return;

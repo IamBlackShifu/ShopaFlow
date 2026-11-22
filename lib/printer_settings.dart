@@ -19,7 +19,9 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
     super.initState();
     // Check connection status on load
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<PrinterManager>().checkConnectionStatus();
+      final manager = context.read<PrinterManager>();
+      manager.checkConnectionStatus();
+      manager.ensureConnected();
     });
   }
 

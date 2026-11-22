@@ -45,6 +45,8 @@ import {
   Store,
   Users,
   Files,
+  Upload,
+  Pencil,
 } from 'lucide-react';
 import { auth, db, firebaseConfig } from './firebase';
 import { DocumentsPage, type CommercialDocument } from './DocumentsPage';
@@ -91,12 +93,18 @@ type ProductRow = {
   local_id?: string | number;
   sync_id?: string;
   company_id?: string;
+  store_id?: string;
   name?: string;
+  description?: string;
   category?: string;
   stock_quantity?: number;
   min_stock_level?: number;
   price?: number;
   cost?: number;
+  barcode?: string;
+  sku?: string;
+  version?: number;
+  created_at?: string;
   deleted_at?: string | null;
 };
 type SaleRow = {
@@ -987,11 +995,55 @@ function Stores({ companyId, stores, canEdit, onChanged }: { companyId: string; 
   );
 }
 
+function parseCsv(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === '"') {
+      if (quoted && text[index + 1] === '"') {
+        cell += '"';
+        index++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === ',' && !quoted) {
+      row.push(cell.trim());
+      cell = '';
+    } else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && text[index + 1] === '\n') index++;
+      row.push(cell.trim());
+      if (row.some((value) => value.length > 0)) rows.push(row);
+      row = [];
+      cell = '';
+    } else {
+      cell += char;
+    }
+  }
+  row.push(cell.trim());
+  if (row.some((value) => value.length > 0)) rows.push(row);
+  return rows;
+}
+
+function csvColumn(header: string[], names: string[], fallback = -1) {
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (const name of names) {
+    const found = header.findIndex((value) => normalize(value) === normalize(name));
+    if (found >= 0) return found;
+  }
+  return fallback;
+}
+
 function Inventory({ companyId, stores, products, categories, canEdit, queryText, onQuery, onChanged }: { companyId: string; stores: StoreRow[]; products: ProductRow[]; categories: CategoryRow[]; canEdit: boolean; queryText: string; onQuery: (value: string) => void; onChanged: () => void }) {
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState('');
   const [draft, setDraft] = useState({ name: '', category: '', newCategory: '', storeId: stores[0]?.id || '', price: '', cost: '', stock: '', minStock: '5' });
+  const [editingId, setEditingId] = useState('');
+  const [editDraft, setEditDraft] = useState({ name: '', category: '', storeId: '', price: '', cost: '', stock: '', minStock: '', barcode: '', sku: '' });
   const categoryNames = useMemo(() => Array.from(new Set([...categories.map((item) => item.name || ''), ...products.map((item) => item.category || '')].map((item) => item.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [categories, products]);
 
   useEffect(() => {
@@ -1025,6 +1077,157 @@ function Inventory({ companyId, stores, products, categories, canEdit, queryText
     }
   }
 
+  function startEdit(item: ProductRow) {
+    setEditingId(item.id);
+    setEditDraft({
+      name: item.name || '',
+      category: item.category || '',
+      storeId: item.store_id || stores[0]?.id || '',
+      price: String(item.price ?? 0),
+      cost: String(item.cost ?? 0),
+      stock: String(item.stock_quantity ?? 0),
+      minStock: String(item.min_stock_level ?? 0),
+      barcode: item.barcode || '',
+      sku: item.sku || '',
+    });
+  }
+
+  async function saveEdit(item: ProductRow) {
+    if (!canEdit || !editDraft.name.trim()) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const now = new Date().toISOString();
+      const categoryName = editDraft.category.trim();
+      if (categoryName) {
+        const categoryId = await stableId('cat', `${companyId}:${categoryName}`);
+        await setDoc(doc(db, 'companies', companyId, 'categories', categoryId), {
+          id: categoryId,
+          sync_id: categoryId,
+          company_id: companyId,
+          name: categoryName,
+          normalized_name: categoryName.toLowerCase(),
+          updated_at: now,
+          sync_status: 'pending',
+          version: 1,
+        }, { merge: true });
+      }
+      await updateDoc(doc(db, 'companies', companyId, 'products', item.id), {
+        name: editDraft.name.trim(),
+        category: categoryName,
+        store_id: editDraft.storeId,
+        price: Number(editDraft.price || 0),
+        cost: Number(editDraft.cost || 0),
+        stock_quantity: Number(editDraft.stock || 0),
+        min_stock_level: Number(editDraft.minStock || 0),
+        barcode: editDraft.barcode.trim() || null,
+        sku: editDraft.sku.trim() || null,
+        updated_at: now,
+        sync_status: 'pending',
+        version: Number(item.version ?? 1) + 1,
+      });
+      setEditingId('');
+      setMessage('Product updated.');
+      onChanged();
+    } catch (error) {
+      setMessage(friendlyError(error, 'Unable to update the product. Please try again.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importCsv(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !canEdit) return;
+    setImporting(true);
+    setMessage('');
+    try {
+      const text = await file.text();
+      const table = parseCsv(text.replace(/^\uFEFF/, ''));
+      if (table.length < 2) throw new Error('CSV is empty or has no data rows.');
+      const header = table[0];
+      const nameIndex = csvColumn(header, ['Name'], 0);
+      const descriptionIndex = csvColumn(header, ['Description'], 1);
+      const priceIndex = csvColumn(header, ['Price'], 2);
+      const costIndex = csvColumn(header, ['Cost'], 3);
+      const stockIndex = csvColumn(header, ['Stock', 'Stock Quantity'], 4);
+      const minStockIndex = csvColumn(header, ['Min Stock', 'Minimum Stock', 'Min Stock Level'], 5);
+      const barcodeIndex = csvColumn(header, ['Barcode'], 6);
+      const categoryIndex = csvColumn(header, ['Category'], 7);
+      const skuIndex = csvColumn(header, ['SKU'], 8);
+      const dataRows = table.slice(1).filter((row) => row.some((value) => value.trim()));
+      if (!dataRows.length) throw new Error('No product rows were found.');
+
+      const existingByName = new Map(products.map((item) => [item.name?.trim().toLowerCase(), item]));
+      const existingByBarcode = new Map(products.filter((item) => item.barcode).map((item) => [item.barcode?.trim().toLowerCase(), item]));
+      const existingBySku = new Map(products.filter((item) => item.sku).map((item) => [item.sku?.trim().toLowerCase(), item]));
+      const now = new Date().toISOString();
+      const storeId = stores[0]?.id || '';
+      if (!storeId) throw new Error('Create a store before importing products.');
+
+      let imported = 0;
+      let updated = 0;
+      for (let start = 0; start < dataRows.length; start += 400) {
+        const batch = writeBatch(db);
+        const chunk = dataRows.slice(start, start + 400);
+        for (const row of chunk) {
+          const valueAt = (index: number) => index >= 0 && index < row.length ? row[index]?.trim() || '' : '';
+          const name = valueAt(nameIndex);
+          if (!name) continue;
+          const category = valueAt(categoryIndex);
+          const barcode = valueAt(barcodeIndex);
+          const sku = valueAt(skuIndex);
+          if (category) {
+            const categoryId = await stableId('cat', `${companyId}:${category}`);
+            batch.set(doc(db, 'companies', companyId, 'categories', categoryId), {
+              id: categoryId,
+              sync_id: categoryId,
+              company_id: companyId,
+              name: category,
+              normalized_name: category.toLowerCase(),
+              updated_at: now,
+              sync_status: 'pending',
+              version: 1,
+            }, { merge: true });
+          }
+          const existing = (barcode && existingByBarcode.get(barcode.toLowerCase()))
+            || (sku && existingBySku.get(sku.toLowerCase()))
+            || existingByName.get(name.toLowerCase());
+          const productId = existing?.id || `prd_${crypto.randomUUID()}`;
+          const payload = {
+            id: productId,
+            sync_id: existing?.sync_id || productId,
+            company_id: companyId,
+            store_id: existing?.store_id || storeId,
+            name,
+            description: valueAt(descriptionIndex),
+            price: Number(valueAt(priceIndex) || 0),
+            cost: Number(valueAt(costIndex) || 0),
+            stock_quantity: Number(valueAt(stockIndex) || 0),
+            min_stock_level: Number(valueAt(minStockIndex) || 5),
+            barcode: barcode || null,
+            category,
+            sku: sku || null,
+            created_at: existing?.created_at || now,
+            updated_at: now,
+            sync_status: 'pending',
+            version: existing ? Number(existing.version ?? 1) + 1 : 1,
+          };
+          batch.set(doc(db, 'companies', companyId, 'products', productId), payload, { merge: true });
+          if (existing) updated++; else imported++;
+        }
+        await batch.commit();
+      }
+      setMessage(`CSV imported: ${imported} added, ${updated} updated.`);
+      onChanged();
+    } catch (error) {
+      setMessage(friendlyError(error, 'Unable to import the CSV. Please check the file format.'));
+    } finally {
+      setImporting(false);
+    }
+  }
+
   return (
     <section>
       <div className="section-head">
@@ -1045,15 +1248,45 @@ function Inventory({ companyId, stores, products, categories, canEdit, queryText
         <label>Minimum stock<input type="number" min="0" step="any" value={draft.minStock} onChange={(event) => setDraft({ ...draft, minStock: event.target.value })} required /></label>
         <button className="primary" disabled={busy || !draft.storeId}>{busy ? 'Saving...' : 'Save product'}</button>
       </form>}
-      {message && <div className={`banner ${message === 'Product added.' ? 'notice' : 'error'}`}>{message}</div>}
+      {message && <div className={`banner ${message === 'Product added.' || message === 'Product updated.' || message.startsWith('CSV imported:') ? 'notice' : 'error'}`}>{message}</div>}
       <div className="toolbar">
         <div className="search-box"><Search size={16} /><input value={queryText} onChange={(event) => onQuery(event.target.value)} placeholder="Search products" /></div>
+        {canEdit && <label className="secondary import-button">
+          <Upload size={16} /> {importing ? 'Importing...' : 'Import CSV'}
+          <input type="file" accept=".csv,text/csv" onChange={importCsv} disabled={importing} />
+        </label>}
       </div>
-      <DataTable
-        empty="No products found."
-        columns={['Product', 'Category', 'Stock', 'Price']}
-        rows={products.map((item) => [item.name || item.id, item.category || 'Uncategorised', String(item.stock_quantity ?? 0), `$${Number(item.price ?? 0).toFixed(2)}`])}
-      />
+      <div className="data-table inventory-table">
+        <div className="table-head" style={{ gridTemplateColumns: 'minmax(150px, 1.5fr) minmax(120px, 1fr) 100px 110px 110px 170px' }}>
+          <span>Product</span><span>Category</span><span>Stock</span><span>Cost</span><span>Price</span><span>Actions</span>
+        </div>
+        {products.map((item) => editingId === item.id ? (
+          <div className="table-row inventory-edit-row" key={item.id} style={{ gridTemplateColumns: 'minmax(150px, 1.5fr) minmax(120px, 1fr) 100px 110px 110px 170px' }}>
+            <input value={editDraft.name} onChange={(event) => setEditDraft({ ...editDraft, name: event.target.value })} aria-label="Product name" />
+            <select value={editDraft.category} onChange={(event) => setEditDraft({ ...editDraft, category: event.target.value })}>
+              <option value="">Uncategorised</option>
+              {categoryNames.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+            <input type="number" min="0" step="any" value={editDraft.stock} onChange={(event) => setEditDraft({ ...editDraft, stock: event.target.value })} aria-label="Stock" />
+            <input type="number" min="0" step="0.01" value={editDraft.cost} onChange={(event) => setEditDraft({ ...editDraft, cost: event.target.value })} aria-label="Cost" />
+            <input type="number" min="0" step="0.01" value={editDraft.price} onChange={(event) => setEditDraft({ ...editDraft, price: event.target.value })} aria-label="Price" />
+            <div className="row-actions">
+              <button className="primary" type="button" disabled={busy} onClick={() => saveEdit(item)}>Save</button>
+              <button className="secondary" type="button" onClick={() => setEditingId('')}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="table-row" key={item.id} style={{ gridTemplateColumns: 'minmax(150px, 1.5fr) minmax(120px, 1fr) 100px 110px 110px 170px' }}>
+            <span>{item.name || item.id}</span>
+            <span>{item.category || 'Uncategorised'}</span>
+            <span>{String(item.stock_quantity ?? 0)}</span>
+            <span>${Number(item.cost ?? 0).toFixed(2)}</span>
+            <span>${Number(item.price ?? 0).toFixed(2)}</span>
+            <div>{canEdit && <button className="secondary row-edit-button" type="button" onClick={() => startEdit(item)}><Pencil size={14} /> Edit</button>}</div>
+          </div>
+        ))}
+        {products.length === 0 && <div className="empty">No products found.</div>}
+      </div>
     </section>
   );
 }
